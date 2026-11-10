@@ -17,7 +17,7 @@ python -m kefu_offline --mac-preview \
   --replay kefu_offline/fixtures/mac_preview_batch.json
 ```
 
-四条都是 15 元模拟商品或未知商品，不使用 20 元或 310 元。已能根据资料回答的才会调模型；工期和退款都没填、或者商品对不上时，只留下待审草稿，不再请求模型。口吻按 `kefu_offline/style.py` 和 `openclaw-plugin/skills/xianyu-kefu/SKILL.md`。多轮套件在 `kefu_offline/fixtures/sim_logic_suite.py`，用 `--suite` 跑，不写入 `kefu_catalog.yml`。云端的 `--fake-model` 只回放规则草稿，不是 Mac 网关实测。
+四条都是 15 元模拟商品或未知商品，不使用 20 元或 310 元。已能根据资料回答的才会调模型；工期和退款都没填、或者商品对不上时，只留下待审草稿，不再请求模型。口吻按 `kefu_offline/style.py` 和 `openclaw-plugin/skills/xianyu-kefu/SKILL.md`。在售可以答「在的」，不必复述「在售」；已售出再说在会被挡住。泛砍价只重复标价，买家明确报低价才写「不行」。问成色而没有成色等级时只说没确认，不把功能写成成色，也不编「成色一般」。多轮套件在 `kefu_offline/fixtures/sim_logic_suite.py`。云端的 `--fake-model` 不是 Mac 网关实测。
 
 成功时进程退出码是 0，输出里 `model_invoked` 为 true，`send_allowed` 和 `transport_send` 为 false，`xianyu_transport` 为 `isolated`。草稿同时出现在终端和 `data/kefu_mac_preview.jsonl`。模型超时、连接失败或坏响应时退出码是 1，并保留规则草稿。缺少上述环境变量时退出码是 2，不会发请求。
 

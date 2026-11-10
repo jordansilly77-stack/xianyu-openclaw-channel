@@ -193,7 +193,7 @@ def _edge_sessions() -> list[dict]:
             "conversation_id": "chat-stock",
             "category": "服装",
             "turns": [
-                _turn("外套还在吗", jacket["id"], ["在售"], ["已售出"], True),
+                _turn("外套还在吗", jacket["id"], [], ["卖出", "没了"], True, availability="in_stock"),
                 _turn(
                     "外套还在吗",
                     jacket["id"],
