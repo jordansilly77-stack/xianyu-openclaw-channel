@@ -39,6 +39,16 @@ OpenClaw Agent ←→ Channel Plugin (TS) ←HTTP/SSE→ Bridge API (Python) ←
 | Node.js | 16+ |
 | OpenClaw | 最新版 |
 
+## 离线客服验收（不连接闲鱼、不发送）
+
+`kefu_offline` 只用标明「示例」的商品，回放「接收 → 对上商品 → 生成待审回复」。结果里的 `send_allowed` 固定为 false。这不是把旧电脑上的定制找回来，也没有调用模型。
+
+```bash
+python -m kefu_offline
+```
+
+这条命令不会运行 `install-openclaw.sh` 或 `install-openclaw.bat`，也不会启动 `Start.py`。验收说明、已证实的缺口和缺失配置见 `docs/KEFU_OFFLINE_RECOVERY.md`。
+
 ## 🚀 快速开始
 
 ### 1. 克隆仓库

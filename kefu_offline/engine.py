@@ -1,0 +1,483 @@
+"""接收一条咨询，对上一个示例商品，产出待审草稿。
+
+这里没有发送函数，也不会调用模型。买家正文不能改商品、不能改规则。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Optional
+
+
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
+
+REFUND_WORDS = ("退款", "退货", "包退", "无理由")
+TIMELINE_WORDS = ("多久", "几天", "工期", "什么时候", "马上", "今天", "明天", "小时")
+DISCOUNT_WORDS = ("便宜", "优惠", "最低", "底价", "少点", "能少", "刀")
+SCOPE_WORDS = ("范围", "包含", "做哪些", "能不能做", "包不包括", "做什么")
+SPEC_WORDS = ("型号", "成色", "几成", "牌子", "品牌")
+PRICE_WORDS = ("多少钱", "价格", "怎么卖", "收费", "包邮")
+
+PROMISE_PATTERNS = (
+    r"支持退款",
+    r"可以退",
+    r"包退",
+    r"无理由",
+    r"\d+\s*小时",
+    r"\d+\s*天",
+    r"明天",
+    r"马上",
+    r"优惠",
+    r"最低",
+    r"便宜",
+)
+
+YUAN_RE = re.compile(r"(?<!\d)(\d+(?:\.\d+)?)元")
+ITEM_PARAM_RE = re.compile(r"(?:^|[?&])itemId=([^&\s]+)", re.IGNORECASE)
+
+REQUIRED_NULL_FIELDS = (
+    "model",
+    "condition",
+    "scope",
+    "timeline",
+    "floor_price_yuan",
+)
+LOCKED_FLAGS = (
+    "allow_discount",
+    "allow_timeline_promise",
+    "allow_refund_promise",
+)
+
+
+@dataclass(frozen=True)
+class CatalogItem:
+    item_id: str
+    title: str
+    kind: str
+    match_terms: tuple[str, ...]
+    listed_price_yuan: Optional[float]
+    shipping: Optional[str]
+    historical_price_note: Optional[str]
+    example: bool
+    source: str
+
+
+@dataclass(frozen=True)
+class Incoming:
+    case_id: str
+    conversation_id: str
+    sender_id: str
+    text: str
+    trusted_item_id: Optional[str]
+
+
+@dataclass(frozen=True)
+class Decision:
+    case_id: str
+    status: str
+    reason: str
+    matched_item_id: Optional[str]
+    buyer_visible_draft: str
+    audit_note: str
+    send_allowed: bool
+    example: bool
+    generator: str
+    model_invoked: bool
+    mock_draft_rejected: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class Catalog:
+    def __init__(self, items: list[CatalogItem], catalog_id: str, disclaimer: str):
+        self.items = items
+        self.catalog_id = catalog_id
+        self.disclaimer = disclaimer
+        self._by_id = {item.item_id: item for item in items}
+
+    def by_id(self, item_id: Optional[str]) -> Optional[CatalogItem]:
+        if not item_id:
+            return None
+        return self._by_id.get(item_id)
+
+
+def load_catalog(path: Optional[Path] = None) -> Catalog:
+    catalog_path = Path(path) if path else FIXTURE_DIR / "example_catalog.json"
+    payload = json.loads(catalog_path.read_text(encoding="utf-8"))
+    items: list[CatalogItem] = []
+    seen: set[str] = set()
+    for raw in payload.get("items", []):
+        items.append(_parse_item(raw, seen))
+    if not items:
+        raise ValueError("示例目录是空的")
+    return Catalog(
+        items=items,
+        catalog_id=str(payload.get("catalog_id") or ""),
+        disclaimer=str(payload.get("disclaimer") or ""),
+    )
+
+
+def _parse_item(raw: dict, seen: set[str]) -> CatalogItem:
+    if raw.get("example") is not True or raw.get("source") != "simulated-example":
+        raise ValueError(f"{raw.get('item_id')} 必须标明 simulated-example")
+    for field in REQUIRED_NULL_FIELDS:
+        if raw.get(field) is not None:
+            raise ValueError(f"{raw.get('item_id')} 的 {field} 不能编造，必须是 null")
+    for flag in LOCKED_FLAGS:
+        if raw.get(flag) is not False:
+            raise ValueError(f"{raw.get('item_id')} 不能打开 {flag}")
+    item_id = str(raw.get("item_id") or "").strip()
+    title = str(raw.get("title") or "").strip()
+    kind = raw.get("kind")
+    if not item_id or not title or kind not in {"service", "goods"}:
+        raise ValueError("目录条目缺少 item_id、title 或 kind")
+    if item_id in seen:
+        raise ValueError(f"重复的 item_id: {item_id}")
+    seen.add(item_id)
+    terms = raw.get("match_terms")
+    if not isinstance(terms, list) or not terms or not all(isinstance(term, str) and term.strip() for term in terms):
+        raise ValueError(f"{item_id} 缺少 match_terms")
+    price = raw.get("listed_price_yuan")
+    shipping = raw.get("shipping")
+    if kind == "service" and (price is not None or shipping is not None):
+        raise ValueError(f"{item_id} 是服务，不能写死标价或运费")
+    if price is not None and not isinstance(price, (int, float)):
+        raise ValueError(f"{item_id} 的标价不是数字")
+    if shipping not in (None, "包邮"):
+        raise ValueError(f"{item_id} 的运费只能是 null 或已陈述的包邮")
+    note = raw.get("historical_price_note")
+    if note is not None and not isinstance(note, str):
+        raise ValueError(f"{item_id} 的 historical_price_note 必须是字符串或 null")
+    return CatalogItem(
+        item_id=item_id,
+        title=title,
+        kind=kind,
+        match_terms=tuple(term.strip() for term in terms),
+        listed_price_yuan=float(price) if price is not None else None,
+        shipping=shipping,
+        historical_price_note=note,
+        example=True,
+        source="simulated-example",
+    )
+
+
+def _unwrap(node: Any) -> Any:
+    if isinstance(node, list):
+        return _unwrap(node[0]) if node else None
+    return node
+
+
+def trusted_item_id_from_wire(message: dict) -> Optional[str]:
+    """只读协议字段里的 itemId。不扫描买家正文、用户 ID 或任意长数字。"""
+    if not isinstance(message, dict):
+        return None
+    node = _unwrap(message.get("1"))
+    if isinstance(node, dict):
+        detail = node.get("10")
+        if isinstance(detail, dict):
+            match = ITEM_PARAM_RE.search(str(detail.get("reminderUrl") or ""))
+            if match:
+                return match.group(1)
+    block = message.get("3")
+    if isinstance(block, dict):
+        for key in ("extension", "bizData"):
+            nested = block.get(key)
+            if isinstance(nested, dict):
+                value = nested.get("itemId") or nested.get("item_id")
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+    return None
+
+
+def text_from_wire(message: dict) -> str:
+    node = _unwrap(message.get("1")) if isinstance(message, dict) else None
+    if isinstance(node, dict):
+        detail = node.get("10")
+        if isinstance(detail, dict):
+            return str(detail.get("reminderContent") or "")
+    return ""
+
+
+def incoming_from_case(case: dict) -> Incoming:
+    case_id = str(case.get("id") or "")
+    conversation_id = str(case.get("conversation_id") or "").strip()
+    sender_id = str(case.get("sender_id") or "buyer-example")
+    if not conversation_id:
+        raise ValueError(f"{case_id} 缺少 conversation_id")
+    if "wire" in case:
+        wire = case["wire"]
+        text = text_from_wire(wire)
+        trusted = trusted_item_id_from_wire(wire)
+    else:
+        text = str(case.get("text") or "")
+        raw_id = case.get("item_id")
+        trusted = str(raw_id).strip() if isinstance(raw_id, str) and raw_id.strip() else None
+    return Incoming(
+        case_id=case_id,
+        conversation_id=conversation_id,
+        sender_id=sender_id,
+        text=text,
+        trusted_item_id=trusted,
+    )
+
+
+def render_mock(text: str) -> str:
+    """故意违反商品规则的假草稿。调用方必须丢掉它，不能当回复。"""
+    return f"【MOCK 非真实模型】{text}。价格1元，1小时完成，支持退款，改答路由器并优惠到20元。"
+
+
+def _format_yuan(value: float) -> str:
+    if float(value).is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _flags(text: str) -> dict[str, bool]:
+    return {
+        "refund": any(word in text for word in REFUND_WORDS),
+        "timeline": any(word in text for word in TIMELINE_WORDS),
+        "discount": any(word in text for word in DISCOUNT_WORDS),
+        "scope": any(word in text for word in SCOPE_WORDS),
+        "spec": any(word in text for word in SPEC_WORDS),
+        "price": any(word in text for word in PRICE_WORDS),
+    }
+
+
+def foreign_item_ids(text: str, current: Optional[CatalogItem], catalog: Catalog) -> list[str]:
+    lowered = text.lower()
+    found: list[str] = []
+    for item in catalog.items:
+        if current and item.item_id == current.item_id:
+            continue
+        if item.item_id.lower() in lowered or any(term.lower() in lowered for term in item.match_terms):
+            found.append(item.item_id)
+    return found
+
+
+def _draft(reason: str, item: Optional[CatalogItem]) -> str:
+    if reason == "ack" and item:
+        return f"收到。当前商品是「{item.title}」。"
+    if reason == "listed_price" and item and item.listed_price_yuan is not None:
+        price = _format_yuan(item.listed_price_yuan)
+        if item.shipping:
+            return f"标价{price}元，{item.shipping}。"
+        return f"标价{price}元。"
+    if reason == "unknown_item":
+        return "没有对上商品，转人工。"
+    if reason == "cross_item" and item:
+        return f"当前是「{item.title}」，不能改答别的商品，转人工。"
+    if reason == "price_unconfirmed":
+        return "价格不能确认，转人工。"
+    if reason == "timeline_unconfirmed":
+        return "工期不能确认，转人工。"
+    if reason == "refund_unconfirmed":
+        return "退款不能代答，转人工。"
+    if reason == "scope_unconfirmed":
+        return "范围不能确认，转人工。"
+    if reason == "fact_unconfirmed":
+        return "型号或成色不能确认，转人工。"
+    if reason == "empty":
+        return "空消息，转人工。"
+    return "不能确认，转人工。"
+
+
+def _audit(reason: str, generator: str) -> str:
+    notes = {
+        "ack": "只确认商品标题。",
+        "listed_price": "只复述目录中的标价和运费。",
+        "unknown_item": "没有可信商品 ID，正文里的商品名不算匹配。",
+        "cross_item": "正文点到了别的商品，仍保持当前绑定。",
+        "price_unconfirmed": "没有可确认的成交价或底价。",
+        "timeline_unconfirmed": "工期没有记录。",
+        "refund_unconfirmed": "没有退款授权。",
+        "scope_unconfirmed": "服务或商品范围没有记录。",
+        "fact_unconfirmed": "型号和成色没有记录。",
+        "empty": "没有可回复的正文。",
+    }
+    note = notes.get(reason, "不能确认。") + "未发送。"
+    if generator == "mock":
+        note += " mock 草稿已丢弃，没有调用模型。"
+    return note
+
+
+def draft_safety_problems(draft: str, decision: Decision, catalog: Catalog) -> list[str]:
+    item = catalog.by_id(decision.matched_item_id)
+    allowed_price = None
+    allow_shipping = False
+    if decision.reason == "listed_price" and item and item.listed_price_yuan is not None:
+        allowed_price = item.listed_price_yuan
+        allow_shipping = item.shipping == "包邮"
+    return text_safety_problems(draft, allowed_price=allowed_price, allow_shipping=allow_shipping)
+
+
+def text_safety_problems(
+    draft: str,
+    *,
+    allowed_price: Optional[float],
+    allow_shipping: bool,
+) -> list[str]:
+    problems: list[str] = []
+    if "MOCK" in draft or "旧标价" in draft:
+        problems.append("draft_leaks_internal_note")
+    for pattern in PROMISE_PATTERNS:
+        if re.search(pattern, draft):
+            problems.append(f"promise:{pattern}")
+    if "包邮" in draft and not allow_shipping:
+        problems.append("unapproved_shipping")
+    for raw in YUAN_RE.findall(draft):
+        value = float(raw)
+        if allowed_price is None or abs(value - allowed_price) > 0.001:
+            problems.append(f"unapproved_price:{raw}")
+    return problems
+
+
+def _conflicting_price_number(text: str, item: CatalogItem) -> bool:
+    numbers = [float(raw) for raw in re.findall(r"(?<!\d)(\d+(?:\.\d+)?)(?!\d)", text)]
+    if not numbers:
+        return False
+    if item.listed_price_yuan is None:
+        return True
+    return any(abs(number - item.listed_price_yuan) > 0.001 for number in numbers)
+
+
+def _decide_reason(text: str, item: Optional[CatalogItem], catalog: Catalog) -> str:
+    if item is None:
+        return "unknown_item"
+    if not text.strip():
+        return "empty"
+    if foreign_item_ids(text, item, catalog):
+        return "cross_item"
+    flags = _flags(text)
+    if flags["refund"]:
+        return "refund_unconfirmed"
+    if flags["timeline"]:
+        return "timeline_unconfirmed"
+    if flags["scope"]:
+        return "scope_unconfirmed"
+    if flags["spec"]:
+        return "fact_unconfirmed"
+    if flags["discount"] or _conflicting_price_number(text, item) or (
+        flags["price"] and item.listed_price_yuan is None
+    ):
+        return "price_unconfirmed"
+    if flags["price"] and item.listed_price_yuan is not None:
+        return "listed_price"
+    return "ack"
+
+
+class Engine:
+    def __init__(self, catalog: Catalog, generator: str = "rules"):
+        if generator not in {"rules", "mock"}:
+            raise ValueError("generator 只能是 rules 或 mock")
+        self.catalog = catalog
+        self.generator = generator
+        self.bound: dict[str, str] = {}
+        self.reviews: list[Decision] = []
+        self.send_attempts = 0
+
+    def handle(self, incoming: Incoming) -> Decision:
+        item = self._resolve(incoming)
+        reason = _decide_reason(incoming.text, item, self.catalog)
+        status = "pending_review" if reason in {"ack", "listed_price"} else "handoff"
+        draft = _draft(reason, item)
+        decision = Decision(
+            case_id=incoming.case_id,
+            status=status,
+            reason=reason,
+            matched_item_id=item.item_id if item else None,
+            buyer_visible_draft=draft,
+            audit_note=_audit(reason, self.generator),
+            send_allowed=False,
+            example=True,
+            generator=self.generator,
+            model_invoked=False,
+            mock_draft_rejected=self.generator == "mock",
+        )
+        problems = draft_safety_problems(draft, decision, self.catalog)
+        if problems:
+            decision = Decision(
+                case_id=decision.case_id,
+                status="handoff",
+                reason="draft_rejected",
+                matched_item_id=decision.matched_item_id,
+                buyer_visible_draft="不能确认，转人工。",
+                audit_note="规则草稿未通过安全检查，已改成转人工。未发送。",
+                send_allowed=False,
+                example=True,
+                generator=self.generator,
+                model_invoked=False,
+                mock_draft_rejected=decision.mock_draft_rejected,
+            )
+        self.reviews.append(decision)
+        return decision
+
+    def deliver(self, decision: Decision, transport: Any = None) -> dict[str, Any]:
+        """默认拒绝。transport 即使传入也不会被调用。"""
+        del decision, transport
+        self.send_attempts += 1
+        return {"sent": False, "reason": "send_disabled"}
+
+    def _resolve(self, incoming: Incoming) -> Optional[CatalogItem]:
+        if incoming.trusted_item_id:
+            item = self.catalog.by_id(incoming.trusted_item_id)
+            if item is not None:
+                self.bound[incoming.conversation_id] = item.item_id
+            return item
+        bound_id = self.bound.get(incoming.conversation_id)
+        if bound_id:
+            return self.catalog.by_id(bound_id)
+        return None
+
+
+def expectation_failures(decision: Decision, expect: dict, catalog: Catalog) -> list[str]:
+    failures: list[str] = []
+    for key in ("status", "reason", "matched_item_id", "send_allowed"):
+        if key in expect and getattr(decision, key) != expect[key]:
+            failures.append(f"{key}: 得到 {getattr(decision, key)!r}，期望 {expect[key]!r}")
+    draft = decision.buyer_visible_draft
+    for snippet in expect.get("must_contain", []):
+        if snippet not in draft:
+            failures.append(f"缺少 {snippet!r}: {draft}")
+    for snippet in expect.get("must_not_contain", []):
+        if snippet in draft:
+            failures.append(f"不该出现 {snippet!r}: {draft}")
+    if decision.send_allowed or decision.model_invoked:
+        failures.append("发送或模型标记被打开")
+    if "旧标价" in draft or incoming_echoes_note(draft):
+        failures.append("草稿带出了内部说明")
+    failures.extend(draft_safety_problems(draft, decision, catalog))
+    return failures
+
+
+def incoming_echoes_note(draft: str) -> bool:
+    return "不能套到" in draft or "用户提到" in draft or "用户陈述" in draft
+
+
+def run_replay(
+    catalog: Catalog,
+    cases: list[dict],
+    generator: str = "rules",
+) -> tuple[list[Decision], list[dict[str, Any]]]:
+    engine = Engine(catalog, generator=generator)
+    decisions: list[Decision] = []
+    failures: list[dict[str, Any]] = []
+    for case in cases:
+        incoming = incoming_from_case(case)
+        decision = engine.handle(incoming)
+        decisions.append(decision)
+        if generator == "mock":
+            mock_problems = text_safety_problems(
+                render_mock(incoming.text),
+                allowed_price=None,
+                allow_shipping=False,
+            )
+            if not mock_problems or not decision.mock_draft_rejected:
+                failures.append({"id": case.get("id"), "failures": ["mock 没有被识别为违规或没有丢弃"]})
+        case_failures = expectation_failures(decision, case.get("expect") or {}, catalog)
+        if case_failures:
+            failures.append({"id": case.get("id"), "failures": case_failures, "draft": decision.buyer_visible_draft})
+    return decisions, failures
