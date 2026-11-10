@@ -26,6 +26,7 @@ export const XianyuConfigSchema = z.object({
   reconnectJitter: z.number().optional(),
   // ✅ 问题5修复：添加 SSE 消息优化配置选项
   sendMode: z.enum(["final-only", "all", "merged"]).optional(),
+  delivery: z.enum(["preview", "send"]).optional(),
   typingIndicator: z.boolean().optional(),
   cacheTimeout: z.number().optional(),
 });

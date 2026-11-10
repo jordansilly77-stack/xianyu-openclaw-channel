@@ -39,15 +39,27 @@ OpenClaw Agent ←→ Channel Plugin (TS) ←HTTP/SSE→ Bridge API (Python) ←
 | Node.js | 16+ |
 | OpenClaw | 最新版 |
 
-## 离线客服验收（不连接闲鱼、不发送）
+## 客服预览（不连接闲鱼、不发送）
 
-`kefu_offline` 只用标明「示例」的商品，回放「接收 → 对上商品 → 生成待审回复」。结果里的 `send_allowed` 固定为 false。这不是把旧电脑上的定制找回来，也没有调用模型。
+买家消息会进入原来的接收和回复路径，生成待审草稿。默认不向买家发送。`kefu_catalog.yml` 里没填的商品事实保持空白。
+
+不连闲鱼的规则回放：
 
 ```bash
 python -m kefu_offline
 ```
 
-这条命令不会运行 `install-openclaw.sh` 或 `install-openclaw.bat`，也不会启动 `Start.py`。验收说明、已证实的缺口和缺失配置见 `docs/KEFU_OFFLINE_RECOVERY.md`。
+父在 Mac 上做单次真实模型预览时，先从本机正式配置读出密钥，再只通过环境变量传入。云端和仓库都不保存这把密钥，也不要改成公网地址。
+
+```bash
+export OPENAI_BASE_URL="http://127.0.0.1:3425/v1"
+export OPENAI_MODEL="group/free-first"
+export OPENAI_API_KEY="从本机正式配置读取"
+export OPENAI_TIMEOUT="30"
+python -m kefu_offline --mac-preview
+```
+
+这条命令使用模拟商品和模拟买家消息，走生产用的商品识别、规则和模型调用，不打开闲鱼连接。说明见 `docs/KEFU_OFFLINE_RECOVERY.md`。
 
 ## 🚀 快速开始
 

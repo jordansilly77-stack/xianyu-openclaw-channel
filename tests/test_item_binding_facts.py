@@ -52,37 +52,37 @@ def _sample_message():
     }
 
 
-def test_upstream_fallback_extractor_returns_sender_id_before_item_url():
+def test_extractor_uses_item_url_not_sender_id():
     extract = _load_upstream_extractor()
     message = _sample_message()
 
-    assert extract(_Dummy(), message) == "2207836320265"
+    assert extract(_Dummy(), message) == "100200300400"
     assert trusted_item_id_from_wire(message) == "100200300400"
 
 
-def test_upstream_fallback_extractor_does_not_walk_list_wrapped_messages():
+def test_extractor_reads_list_wrapped_item_url():
     extract = _load_upstream_extractor()
     message = _sample_message()
     wrapped = {"1": [message["1"]], "3": {}}
 
-    assert extract(_Dummy(), wrapped) is None
+    assert extract(_Dummy(), wrapped) == "100200300400"
     assert trusted_item_id_from_wire(wrapped) == "100200300400"
 
 
-def test_live_handler_order_and_plugin_drop_item_id():
+def test_live_handler_keeps_unknown_items_for_review():
     source = (ROOT / "XianyuAutoAsync.py").read_text(encoding="utf-8")
     start = source.index("    async def handle_message")
     end = source.index("\n    async def ", start + 10)
     handler = source[start:end]
 
-    assert handler.index('url_info.split("itemId=")') < handler.index(
-        "extract_item_id_from_message"
+    assert handler.index("normalize_wire_message") < handler.index(
+        "消息格式错误：缺少必要的字段结构"
     )
-    assert 'item_id = f"auto_{user_id}_{int(time.time())}"' in handler
+    assert "auto_{user_id}" not in handler
+    assert "needsHuman" in handler
     assert handler.index("消息格式错误：缺少必要的字段结构") < handler.index(
         "bridge_queue.publish"
     )
-    assert "isinstance(message[\"1\"], dict)" in handler
 
     chat_check = source[
         source.index("    def is_chat_message") : source.index("    def is_sync_package")
@@ -92,15 +92,16 @@ def test_live_handler_order_and_plugin_drop_item_id():
     inbound = (ROOT / "openclaw-plugin" / "src" / "inbound-handler.ts").read_text(
         encoding="utf-8"
     )
-    assert "itemId" not in inbound
-    assert "data.content" in inbound
+    assert "buyerVisibleBody" in inbound
+    assert "deliveryAllowsSend" in inbound
+    assert "ItemId: data.itemId" in inbound
 
     reply = source[source.index("    async def get_ai_reply") : source.index("    def _parse_price")]
-    assert "商品信息获取失败" in reply
-    assert "generate_reply(" in reply
+    assert "商品信息获取失败" not in reply
+    assert "不编造商品" in reply
 
     config = (ROOT / "global_config.yml").read_text(encoding="utf-8")
-    assert "enabled: true" in config
+    assert "delivery: preview" in config
     assert "可以直接申请退款" in config
 
     assert not (ROOT / "safari_token.py").exists()

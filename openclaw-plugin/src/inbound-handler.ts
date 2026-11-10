@@ -11,6 +11,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import type { BridgeMessageEvent, ChannelLogSink, XianyuChannelConfig } from "./types";
 import { getXianyuRuntime } from "./runtime";
 import { resolveXianyuAccount } from "./config";
+import { buyerVisibleBody, deliveryAllowsSend } from "./inbound-item";
 
 export interface HandleBridgeMessageParams {
   cfg: OpenClawConfig;
@@ -126,7 +127,7 @@ export async function handleBridgeMessage(
     channel: "Xianyu",
     from: fromLabel,
     timestamp: data.timestamp,
-    body: data.content,
+    body: buyerVisibleBody(data),
     chatType: "direct",
     sender: { name: senderName, id: senderId },
     previousTimestamp,
@@ -150,6 +151,9 @@ export async function handleBridgeMessage(
     Surface: "xianyu",
     MessageSid: data.messageId,
     Timestamp: data.timestamp,
+    ItemId: data.itemId,
+    ItemKnown: data.itemKnown === true,
+    NeedsHuman: data.needsHuman === true,
     MediaPath: data.contentType === "image" ? (data as any).imageUrl : undefined,
     MediaType: data.contentType === "image" ? "image" : undefined,
     CommandAuthorized: true,
@@ -183,6 +187,10 @@ export async function handleBridgeMessage(
       responsePrefix: "",
       deliver: async (payload: any, info?: { kind: string }) => {
         try {
+          if (!deliveryAllowsSend(xianyuConfig)) {
+            log?.info?.(`[Xianyu][${accountId}] 预览/待审，不向买家发送`);
+            return;
+          }
           const textToSend = payload.markdown || payload.text;
           if (!textToSend) {
             return;

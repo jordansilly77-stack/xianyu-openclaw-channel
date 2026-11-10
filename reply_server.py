@@ -352,6 +352,14 @@ if BRIDGE_ROUTER_AVAILABLE:
 else:
     logger.warning("⚠️ OpenClaw Bridge API 路由未注册")
 
+try:
+    from kefu_offline.http_api import router as kefu_router
+    if kefu_router is not None:
+        app.include_router(kefu_router)
+        logger.info("已注册客服待审路由: /api/kefu/reviews")
+except Exception as kefu_router_error:
+    logger.warning(f"客服待审路由未注册: {kefu_router_error}")
+
 # 初始化文件日志收集器
 setup_file_logging()
 

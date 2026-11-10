@@ -29,7 +29,7 @@ def test_rules_replay_matches_expectations():
     assert len(decisions) == len(cases)
     assert all(item.send_allowed is False for item in decisions)
     assert all(item.model_invoked is False for item in decisions)
-    assert all(item.example is True for item in decisions)
+    assert all(item.example is True for item in decisions if item.matched_item_id)
     assert all(item.generator == "rules" for item in decisions)
     assert all("旧标价" not in item.buyer_visible_draft for item in decisions)
     assert all("用户提到" not in item.buyer_visible_draft for item in decisions)
@@ -162,7 +162,7 @@ def test_listed_router_price_and_refuses_other_amount():
     )
 
     assert quoted.reason == "listed_price"
-    assert quoted.buyer_visible_draft == "标价310元，包邮。"
+    assert quoted.buyer_visible_draft == "「二手路由器」标价310元，包邮。"
     assert refused.reason == "price_unconfirmed"
     assert "20" not in refused.buyer_visible_draft
     assert "310" not in refused.buyer_visible_draft

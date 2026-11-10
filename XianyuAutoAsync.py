@@ -3034,88 +3034,15 @@ class XianyuLive:
             return await self.get_item_info(item_id, retry_count + 1)
 
     def extract_item_id_from_message(self, message):
-        """从消息中提取商品ID的辅助方法"""
+        """只读取协议中的商品字段。发送者 ID、聊天 ID 和买家正文里的数字都不是商品 ID。"""
         try:
-            # 方法1: 从message["1"]中提取（如果是字符串格式）
-            message_1 = message.get('1')
-            if isinstance(message_1, str):
-                # 尝试从字符串中提取数字ID
-                id_match = re.search(r'(\d{10,})', message_1)
-                if id_match:
-                    logger.info(f"从message[1]字符串中提取商品ID: {id_match.group(1)}")
-                    return id_match.group(1)
-
-            # 方法2: 从message["3"]中提取
-            message_3 = message.get('3', {})
-            if isinstance(message_3, dict):
-
-                # 从extension中提取
-                if 'extension' in message_3:
-                    extension = message_3['extension']
-                    if isinstance(extension, dict):
-                        item_id = extension.get('itemId') or extension.get('item_id')
-                        if item_id:
-                            logger.info(f"从extension中提取商品ID: {item_id}")
-                            return item_id
-
-                # 从bizData中提取
-                if 'bizData' in message_3:
-                    biz_data = message_3['bizData']
-                    if isinstance(biz_data, dict):
-                        item_id = biz_data.get('itemId') or biz_data.get('item_id')
-                        if item_id:
-                            logger.info(f"从bizData中提取商品ID: {item_id}")
-                            return item_id
-
-                # 从其他可能的字段中提取
-                for key, value in message_3.items():
-                    if isinstance(value, dict):
-                        item_id = value.get('itemId') or value.get('item_id')
-                        if item_id:
-                            logger.info(f"从{key}字段中提取商品ID: {item_id}")
-                            return item_id
-
-                # 从消息内容中提取数字ID
-                content = message_3.get('content', '')
-                if isinstance(content, str) and content:
-                    id_match = re.search(r'(\d{10,})', content)
-                    if id_match:
-                        logger.info(f"【{self.cookie_id}】从消息内容中提取商品ID: {id_match.group(1)}")
-                        return id_match.group(1)
-
-            # 方法3: 遍历整个消息结构查找可能的商品ID
-            def find_item_id_recursive(obj, path=""):
-                if isinstance(obj, dict):
-                    # 直接查找itemId字段
-                    for key in ['itemId', 'item_id', 'id']:
-                        if key in obj and isinstance(obj[key], (str, int)):
-                            value = str(obj[key])
-                            if len(value) >= 10 and value.isdigit():
-                                logger.info(f"从{path}.{key}中提取商品ID: {value}")
-                                return value
-
-                    # 递归查找
-                    for key, value in obj.items():
-                        result = find_item_id_recursive(value, f"{path}.{key}" if path else key)
-                        if result:
-                            return result
-
-                elif isinstance(obj, str):
-                    # 从字符串中提取可能的商品ID
-                    id_match = re.search(r'(\d{10,})', obj)
-                    if id_match:
-                        logger.info(f"从{path}字符串中提取商品ID: {id_match.group(1)}")
-                        return id_match.group(1)
-
-                return None
-
-            result = find_item_id_recursive(message)
-            if result:
-                return result
-
-            logger.warning("所有方法都未能提取到商品ID")
+            from kefu_offline.engine import normalize_wire_message, trusted_item_id_from_wire
+            item_id = trusted_item_id_from_wire(normalize_wire_message(message))
+            if item_id:
+                logger.info(f"【{self.cookie_id}】从可信字段提取商品ID: {item_id}")
+                return item_id
+            logger.warning(f"【{self.cookie_id}】可信字段中没有商品ID")
             return None
-
         except Exception as e:
             logger.error(f"提取商品ID失败: {self._safe_str(e)}")
             return None
@@ -3481,13 +3408,8 @@ class XianyuLive:
             item_info_raw = db_manager.get_item_info(self.cookie_id, item_id)
 
             if not item_info_raw:
-                logger.warning(f"数据库中无商品信息: {item_id}")
-                # 使用默认商品信息
-                item_info = {
-                    'title': '商品信息获取失败',
-                    'price': 0,
-                    'desc': '暂无商品描述'
-                }
+                logger.warning(f"数据库中无商品信息: {item_id}，不编造商品后交给待审")
+                return None
             else:
                 # 解析数据库中的商品信息
                 item_info = {
@@ -7324,6 +7246,22 @@ class XianyuLive:
             msg_time: 消息时间
         """
         try:
+            from kefu_offline.live import handle_live_message, transport_send_allowed
+            try:
+                handle_live_message(
+                    cookie_id=self.cookie_id,
+                    chat_id=chat_id,
+                    sender_id=send_user_id,
+                    sender_name=send_user_name,
+                    text=send_message,
+                    item_id=None if not item_id or str(item_id).startswith("auto_") else str(item_id),
+                )
+            except Exception as review_error:
+                logger.error(f"[{msg_time}] 【{self.cookie_id}】写入待审草稿失败: {self._safe_str(review_error)}")
+            if not transport_send_allowed():
+                logger.info(f"[{msg_time}] 【{self.cookie_id}】客服处于预览/待审，不向买家发送")
+                return
+
             # 自动回复消息
             if not AUTO_REPLY.get('enabled', True):
                 logger.info(f"[{msg_time}] 【{self.cookie_id}】【系统】自动回复已禁用")
@@ -7573,6 +7511,9 @@ class XianyuLive:
                 logger.warning(f"消息内容: {message}")
                 return
 
+            from kefu_offline.engine import normalize_wire_message
+            message = normalize_wire_message(message)
+
             # 【消息接收标识】记录收到消息的时间，用于控制Cookie刷新
             self.last_message_received_time = time.time()
             logger.warning(f"【{self.cookie_id}】收到消息，更新消息接收时间标识")
@@ -7684,12 +7625,11 @@ class XianyuLive:
                     item_id = self.extract_item_id_from_message(message)
 
                 if not item_id:
-                    item_id = f"auto_{user_id}_{int(time.time())}"
-                    logger.warning(f"无法提取商品ID，使用默认值: {item_id}")
+                    logger.warning("没有可信商品ID，转入待人工，不编造商品")
 
             except Exception as e:
                 logger.error(f"提取商品ID时发生错误: {self._safe_str(e)}")
-                item_id = f"auto_{user_id}_{int(time.time())}"
+                item_id = None
             # 处理订单状态消息
             try:
                 logger.info(message)
@@ -7776,39 +7716,31 @@ class XianyuLive:
                 # 🔗 OpenClaw Bridge 模式：将买家消息发布到 Bridge 消息队列
                 if BRIDGE_ENABLED and bridge_queue:
                     try:
-                        # ✅ 商品所有权过滤：只发布属于当前账号的商品消息
-                        should_publish = True
-                        if item_id and item_id != "未知商品":
+                        item_known = False
+                        if item_id:
                             try:
                                 from db_manager import db_manager
-                                item_info = db_manager.get_item_info(self.cookie_id, item_id)
-                                if not item_info:
-                                    logger.debug(f"[Bridge] 商品 {item_id} 不属于账号 {self.cookie_id}，跳过消息发布")
-                                    should_publish = False
-                                else:
-                                    logger.debug(f"[Bridge] 商品 {item_id} 归属验证通过，发布消息")
+                                item_known = bool(db_manager.get_item_info(self.cookie_id, item_id))
                             except Exception as e:
-                                logger.warning(f"[Bridge] 检查商品归属失败: {e}，跳过消息发布")
-                                should_publish = False
-                        
-                        # 只有商品属于当前账号时才发布消息
-                        if should_publish:
-                            msg_data = {
-                                "messageId": f"{self.cookie_id}:{chat_id}:{int(create_time)}",
-                                "conversationId": chat_id,
-                                "senderId": send_user_id,
-                                "senderName": send_user_name,
-                                "content": send_message,
-                                "contentType": "image" if content_type == 2 else "text",
-                                "itemId": item_id,
-                                "timestamp": create_time,
-                                "accountId": self.cookie_id,
-                            }
-                            # 如果是图片消息，添加图片URL
-                            if pic_url:
-                                msg_data["imageUrl"] = pic_url
-                            await bridge_queue.publish(self.cookie_id, msg_data)
-                            logger.debug(f"[Bridge] 消息已发布到队列: item_id={item_id}, sender={send_user_name}")
+                                logger.warning(f"[Bridge] 检查商品资料失败: {e}，按未确认商品继续交给待审")
+                                item_known = False
+                        msg_data = {
+                            "messageId": f"{self.cookie_id}:{chat_id}:{int(create_time)}",
+                            "conversationId": chat_id,
+                            "senderId": send_user_id,
+                            "senderName": send_user_name,
+                            "content": send_message,
+                            "contentType": "image" if content_type == 2 else "text",
+                            "itemId": item_id,
+                            "itemKnown": item_known,
+                            "needsHuman": not item_known,
+                            "timestamp": create_time,
+                            "accountId": self.cookie_id,
+                        }
+                        if pic_url:
+                            msg_data["imageUrl"] = pic_url
+                        await bridge_queue.publish(self.cookie_id, msg_data)
+                        logger.debug(f"[Bridge] 消息已发布到队列: item_id={item_id}, sender={send_user_name}")
                     except Exception as e:
                         logger.debug(f"[Bridge] 发布消息到桥接队列失败: {e}")
 

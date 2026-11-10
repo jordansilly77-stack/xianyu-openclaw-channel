@@ -637,6 +637,7 @@ def load_keywords_file(path: str):
 
 async def main():
     print("开始启动主程序...")
+    print("客服默认是预览/待审。未设置 XIANYU_ALLOW_SEND=1 时，不会向买家发送消息。")
 
     # 初始化文件日志收集器
     print("初始化文件日志收集器...")

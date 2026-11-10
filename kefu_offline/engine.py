@@ -63,6 +63,13 @@ class CatalogItem:
     historical_price_note: Optional[str]
     example: bool
     source: str
+    scope_text: Optional[str] = None
+    timeline_text: Optional[str] = None
+    model_text: Optional[str] = None
+    condition_text: Optional[str] = None
+    refund_policy: Optional[str] = None
+    description: Optional[str] = None
+    floor_price_yuan: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +172,17 @@ def _parse_item(raw: dict, seen: set[str]) -> CatalogItem:
     )
 
 
+def normalize_wire_message(message: Any) -> Any:
+    """把列表形式的消息主体展开成字典，供原有处理逻辑继续往下走。"""
+    if not isinstance(message, dict):
+        return message
+    normalized = dict(message)
+    node = normalized.get("1")
+    if isinstance(node, list):
+        normalized["1"] = node[0] if node and isinstance(node[0], dict) else {}
+    return normalized
+
+
 def _unwrap(node: Any) -> Any:
     if isinstance(node, list):
         return _unwrap(node[0]) if node else None
@@ -258,14 +276,53 @@ def foreign_item_ids(text: str, current: Optional[CatalogItem], catalog: Catalog
     return found
 
 
+def trusted_corpus(item: Optional[CatalogItem]) -> str:
+    if item is None:
+        return ""
+    parts = [
+        item.title,
+        item.scope_text,
+        item.timeline_text,
+        item.model_text,
+        item.condition_text,
+        item.refund_policy,
+        item.description,
+        item.shipping,
+    ]
+    return "\n".join(part for part in parts if part)
+
+
 def _draft(reason: str, item: Optional[CatalogItem]) -> str:
     if reason == "ack" and item:
-        return f"收到。当前商品是「{item.title}」。"
+        parts = [f"收到。当前商品是「{item.title}」。"]
+        if item.listed_price_yuan is not None:
+            parts.append(f"标价{_format_yuan(item.listed_price_yuan)}元。")
+        if item.shipping:
+            parts.append(f"{item.shipping}。")
+        if item.description:
+            parts.append(item.description if item.description.endswith("。") else f"{item.description}。")
+        return "".join(parts)
+    if reason == "scope_quote" and item and item.scope_text:
+        return item.scope_text if item.scope_text.endswith("。") else f"范围：{item.scope_text}。"
+    if reason == "timeline_quote" and item and item.timeline_text:
+        return item.timeline_text if str(item.timeline_text).endswith("。") else f"工期：{item.timeline_text}。"
+    if reason == "spec_quote" and item:
+        bits = []
+        if item.model_text:
+            bits.append(f"型号：{item.model_text}")
+        if item.condition_text:
+            bits.append(f"成色：{item.condition_text}")
+        return "。".join(bits) + ("。" if bits else "型号或成色不能确认，转人工。")
+    if reason == "refund_quote" and item and item.refund_policy:
+        return item.refund_policy if item.refund_policy.endswith("。") else f"{item.refund_policy}。"
+    if reason == "floor_quote" and item and item.floor_price_yuan is not None:
+        return f"底价{_format_yuan(item.floor_price_yuan)}元。"
     if reason == "listed_price" and item and item.listed_price_yuan is not None:
         price = _format_yuan(item.listed_price_yuan)
+        title = f"「{item.title}」" if item.title else ""
         if item.shipping:
-            return f"标价{price}元，{item.shipping}。"
-        return f"标价{price}元。"
+            return f"{title}标价{price}元，{item.shipping}。"
+        return f"{title}标价{price}元。"
     if reason == "unknown_item":
         return "没有对上商品，转人工。"
     if reason == "cross_item" and item:
@@ -287,8 +344,13 @@ def _draft(reason: str, item: Optional[CatalogItem]) -> str:
 
 def _audit(reason: str, generator: str) -> str:
     notes = {
-        "ack": "只确认商品标题。",
-        "listed_price": "只复述目录中的标价和运费。",
+        "ack": "只使用已填写的商品资料。",
+        "listed_price": "只复述已填写的标价和运费。",
+        "scope_quote": "只复述已填写的范围。",
+        "timeline_quote": "只复述已填写的工期。",
+        "spec_quote": "只复述已填写的型号或成色。",
+        "refund_quote": "只复述已填写的退换说明。",
+        "floor_quote": "只复述已填写的底价。",
         "unknown_item": "没有可信商品 ID，正文里的商品名不算匹配。",
         "cross_item": "正文点到了别的商品，仍保持当前绑定。",
         "price_unconfirmed": "没有可确认的成交价或底价。",
@@ -304,14 +366,25 @@ def _audit(reason: str, generator: str) -> str:
     return note
 
 
+_DIRECT_REASONS = {"ack", "listed_price", "scope_quote", "timeline_quote", "spec_quote", "refund_quote", "floor_quote"}
+
+
 def draft_safety_problems(draft: str, decision: Decision, catalog: Catalog) -> list[str]:
     item = catalog.by_id(decision.matched_item_id)
-    allowed_price = None
+    allowed_prices: list[float] = []
     allow_shipping = False
-    if decision.reason == "listed_price" and item and item.listed_price_yuan is not None:
-        allowed_price = item.listed_price_yuan
+    if item and decision.reason in _DIRECT_REASONS and item.listed_price_yuan is not None:
+        allowed_prices.append(item.listed_price_yuan)
         allow_shipping = item.shipping == "包邮"
-    return text_safety_problems(draft, allowed_price=allowed_price, allow_shipping=allow_shipping)
+    if item and decision.reason == "floor_quote" and item.floor_price_yuan is not None:
+        allowed_prices.append(item.floor_price_yuan)
+    return text_safety_problems(
+        draft,
+        allowed_price=allowed_prices[0] if len(allowed_prices) == 1 else None,
+        allowed_prices=allowed_prices,
+        allow_shipping=allow_shipping,
+        trusted_text=trusted_corpus(item),
+    )
 
 
 def text_safety_problems(
@@ -319,18 +392,25 @@ def text_safety_problems(
     *,
     allowed_price: Optional[float],
     allow_shipping: bool,
+    trusted_text: str = "",
+    allowed_prices: Optional[list[float]] = None,
 ) -> list[str]:
     problems: list[str] = []
     if "MOCK" in draft or "旧标价" in draft:
         problems.append("draft_leaks_internal_note")
+    prices = list(allowed_prices or [])
+    if allowed_price is not None and not prices:
+        prices.append(allowed_price)
     for pattern in PROMISE_PATTERNS:
-        if re.search(pattern, draft):
-            problems.append(f"promise:{pattern}")
-    if "包邮" in draft and not allow_shipping:
+        for match in re.finditer(pattern, draft):
+            if match.group(0) not in trusted_text:
+                problems.append(f"promise:{pattern}")
+                break
+    if "包邮" in draft and not allow_shipping and "包邮" not in trusted_text:
         problems.append("unapproved_shipping")
     for raw in YUAN_RE.findall(draft):
         value = float(raw)
-        if allowed_price is None or abs(value - allowed_price) > 0.001:
+        if not any(abs(value - price) <= 0.001 for price in prices):
             problems.append(f"unapproved_price:{raw}")
     return problems
 
@@ -353,20 +433,41 @@ def _decide_reason(text: str, item: Optional[CatalogItem], catalog: Catalog) -> 
         return "cross_item"
     flags = _flags(text)
     if flags["refund"]:
-        return "refund_unconfirmed"
+        return "refund_quote" if item.refund_policy else "refund_unconfirmed"
     if flags["timeline"]:
-        return "timeline_unconfirmed"
+        return "timeline_quote" if item.timeline_text else "timeline_unconfirmed"
     if flags["scope"]:
-        return "scope_unconfirmed"
+        return "scope_quote" if item.scope_text else "scope_unconfirmed"
     if flags["spec"]:
-        return "fact_unconfirmed"
-    if flags["discount"] or _conflicting_price_number(text, item) or (
-        flags["price"] and item.listed_price_yuan is None
-    ):
+        return "spec_quote" if (item.model_text or item.condition_text) else "fact_unconfirmed"
+    if flags["discount"]:
+        return "floor_quote" if item.floor_price_yuan is not None else "price_unconfirmed"
+    if _conflicting_price_number(text, item) or (flags["price"] and item.listed_price_yuan is None):
         return "price_unconfirmed"
     if flags["price"] and item.listed_price_yuan is not None:
         return "listed_price"
     return "ack"
+
+
+def _with_other_known(reason: str, item: Optional[CatalogItem], text: str, draft: str) -> str:
+    if reason not in _DIRECT_REASONS or item is None:
+        return draft
+    flags = _flags(text)
+    extras: list[str] = []
+    if (
+        flags["price"]
+        and reason != "listed_price"
+        and item.listed_price_yuan is not None
+        and not _conflicting_price_number(text, item)
+        and "标价" not in draft
+    ):
+        price = _format_yuan(item.listed_price_yuan)
+        extras.append(f"标价{price}元" + (f"，{item.shipping}" if item.shipping else "") + "。")
+    if flags["scope"] and reason != "scope_quote" and item.scope_text and "范围：" not in draft:
+        extras.append(f"范围：{item.scope_text}")
+    if flags["timeline"] and reason != "timeline_quote" and item.timeline_text and "工期：" not in draft:
+        extras.append(f"工期：{item.timeline_text}")
+    return draft + "".join(extras)
 
 
 class Engine:
@@ -382,8 +483,8 @@ class Engine:
     def handle(self, incoming: Incoming) -> Decision:
         item = self._resolve(incoming)
         reason = _decide_reason(incoming.text, item, self.catalog)
-        status = "pending_review" if reason in {"ack", "listed_price"} else "handoff"
-        draft = _draft(reason, item)
+        status = "pending_review" if reason in _DIRECT_REASONS else "handoff"
+        draft = _with_other_known(reason, item, incoming.text, _draft(reason, item))
         decision = Decision(
             case_id=incoming.case_id,
             status=status,
@@ -392,7 +493,7 @@ class Engine:
             buyer_visible_draft=draft,
             audit_note=_audit(reason, self.generator),
             send_allowed=False,
-            example=True,
+            example=bool(item and item.example),
             generator=self.generator,
             model_invoked=False,
             mock_draft_rejected=self.generator == "mock",
