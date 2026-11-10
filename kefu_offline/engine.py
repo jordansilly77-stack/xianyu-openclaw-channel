@@ -21,7 +21,7 @@ ARRIVAL_WORDS = ("到手", "到货", "送达", "收到", "物流")
 DISCOUNT_WORDS = ("便宜", "优惠", "最低", "底价", "少点", "能少", "刀")
 SCOPE_WORDS = ("范围", "包含", "做哪些", "能不能做", "包不包括", "做什么")
 SPEC_WORDS = ("型号", "成色", "几成", "牌子", "品牌")
-PRICE_WORDS = ("多少钱", "价格", "怎么卖", "收费", "包邮", "那个价", "刚才的价", "还是一样", "什么价", "怎么卖", "开价", "报价")
+PRICE_WORDS = ("多少钱", "卖多少", "价格", "怎么卖", "收费", "包邮", "那个价", "刚才的价", "还是一样", "什么价", "开价", "报价")
 SHIP_WORDS = ("邮费", "运费", "邮寄", "自提", "寄到")
 STOCK_WORDS = ("还在吗", "有货", "卖出", "还有吗")
 QTY_RE = re.compile(r"(\d+|[两三四五])\s*(件|套|本|台)")
@@ -348,8 +348,16 @@ def _listed_phrase(item: CatalogItem) -> str:
     return stated
 
 
-def _price_sentence(item: CatalogItem, text: str, *, refuse: bool) -> str:
+def _bill_phrase(item: CatalogItem) -> str:
+    """标价句只带会改实付的附加费。范围和工期不放进单纯报价。"""
     stated = _listed_phrase(item)
+    if item.addons_text:
+        stated = f"{stated}，{item.addons_text}"
+    return stated
+
+
+def _price_sentence(item: CatalogItem, text: str, *, refuse: bool) -> str:
+    stated = _bill_phrase(item)
     if refuse:
         offer = _offer_amount(text, item)
         if offer is not None:

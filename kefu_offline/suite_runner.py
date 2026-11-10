@@ -240,7 +240,9 @@ def run_suite(
             "reason": record.get("reason"),
             "model_invoked": bool(record.get("model_invoked")),
             "model_adopted": bool(record.get("model_adopted")),
-            "model_rejected": bool(record.get("model_rejected")),
+            "model_rejected": bool(record.get("model_invoked")) and bool(record.get("model_rejected")),
+            "inherited_model_rejected": bool(record.get("inherited_model_rejected")),
+            "reject_source": record.get("reject_source"),
             "model_error": record.get("model_error") or error,
             "duplicate": bool(record.get("duplicate")),
             "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
@@ -259,7 +261,7 @@ def run_suite(
         row["model_output_ok"] = (
             None if not record.get("model_invoked") else not bool(record.get("model_rejected"))
         )
-        row["guard_blocked"] = bool(record.get("model_rejected")) and row["final_ok"]
+        row["guard_blocked"] = row["model_rejected"] and row["final_ok"]
         row["ok"] = not failures
         results.append(row)
         if checkpoint:
@@ -333,6 +335,7 @@ def _summarize(sessions: list[dict[str, Any]], results: list[dict[str, Any]]) ->
         "model_invoked": sum(1 for row in results if row.get("model_invoked")),
         "model_adopted": sum(1 for row in results if row.get("model_adopted")),
         "model_rejected": sum(1 for row in results if row.get("model_rejected")),
+        "inherited_guard": sum(1 for row in results if row.get("inherited_model_rejected")),
         "model_error": sum(1 for row in results if row.get("model_error")),
         "rule_skipped": sum(1 for row in results if not row.get("model_invoked")),
         "duplicate": sum(1 for row in results if row.get("duplicate")),

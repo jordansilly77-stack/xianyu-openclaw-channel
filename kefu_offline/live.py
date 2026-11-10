@@ -169,9 +169,13 @@ def handle_live_message(
     key = (cookie_id, chat_id)
     if message_id and (cookie_id, chat_id, message_id) in _SEEN:
         cached = dict(_SEEN[(cookie_id, chat_id, message_id)])
+        inherited = bool(cached.get("model_rejected"))
         cached["duplicate"] = True
         cached["model_invoked"] = False
         cached["model_adopted"] = False
+        cached["model_rejected"] = False
+        cached["inherited_model_rejected"] = inherited
+        cached["reject_source"] = "cached_final" if inherited else "cached_turn"
         cached["send_allowed"] = False
         cached["transport_send"] = False
         return cached
@@ -339,6 +343,7 @@ def _apply_model(
         DISCOUNT_WORDS,
         PRICE_WORDS,
         REFUND_WORDS,
+        SCOPE_WORDS,
         _asks_arrival,
         _asks_identity,
         _asks_work,
@@ -390,6 +395,16 @@ def _apply_model(
             break
     if "收到" in candidate and "收到" not in corpus and "收到时间" not in candidate:
         problems.append("invented_arrival")
+    asks_price = any(word in buyer_text for word in PRICE_WORDS + DISCOUNT_WORDS + ("最低", "底价")) or _offer_amount(buyer_text, item) is not None
+    price_only = asks_price and "情况" not in buyer_text and not _asks_work(buyer_text) and not any(word in buyer_text for word in SCOPE_WORDS)
+    if price_only and item.addons_text and item.addons_text not in candidate:
+        problems.append("omitted_addon")
+    if price_only and (
+        (item.scope_text and item.scope_text in candidate)
+        or "工期" in candidate
+        or (item.pickup_text and item.pickup_text in candidate)
+    ):
+        problems.append("over_answer")
     if "情况" in buyer_text and item.addons_text and item.addons_text not in candidate:
         problems.append("omitted_addon")
     if "情况" in buyer_text and item.scope_text and item.scope_text not in candidate:
@@ -403,7 +418,6 @@ def _apply_model(
         problems.append("repeated_stock")
     if item.listed_price_yuan is not None:
         price_token = _money(item, item.listed_price_yuan)
-        asks_price = any(word in buyer_text for word in PRICE_WORDS + DISCOUNT_WORDS + ("最低", "底价")) or _offer_amount(buyer_text, item) is not None
         if price_token in candidate and price_token not in rule_draft and not asks_price:
             problems.append("repeated_price")
     if _asks_identity(buyer_text) and candidate.startswith("是自动回复。") and rule_draft.startswith("是自动回复，"):
@@ -422,6 +436,7 @@ def _apply_model(
             record["reject_reasons"].append("copied_buyer_instruction")
     if problems or _copies_untrusted_instruction(candidate, buyer_text) or violates_style(candidate):
         record["model_rejected"] = True
+        record["reject_source"] = "model_call"
         record["model_adopted"] = False
         record["audit_note"] = record["audit_note"] + " 模型候选未通过商品约束，已丢弃。未发送。"
         return

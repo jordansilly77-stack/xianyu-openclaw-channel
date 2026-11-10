@@ -90,7 +90,7 @@ def reeval_cli(args) -> int:
 
 
 def run_suite_cli(args) -> int:
-    from kefu_offline.fixtures.sim_logic_suite import build_suite, deep_suite, exposed_suite, style_suite, suite_counts, write_catalog
+    from kefu_offline.fixtures.sim_logic_suite import build_suite, close_suite, deep_suite, exposed_suite, style_suite, suite_counts, write_catalog
 
     if args.subset == "exposed":
         sessions = exposed_suite()
@@ -98,10 +98,12 @@ def run_suite_cli(args) -> int:
         sessions = style_suite()
     elif args.subset == "deep":
         sessions = deep_suite()
+    elif args.subset == "close":
+        sessions = close_suite()
     else:
         sessions = build_suite()
     counts = suite_counts(sessions)
-    full = args.subset not in {"exposed", "style", "deep"}
+    full = args.subset not in {"exposed", "style", "deep", "close"}
     if full and (counts["turns"] < 200 or counts["sessions"] < 30 or counts["expect_model"] < 120 or counts["categories"] < 10):
         json.dump({"ok": False, "counts": counts}, sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")
@@ -138,7 +140,7 @@ def run_suite_cli(args) -> int:
         resume=args.resume,
     )
     public = {key: value for key, value in summary.items() if key != "results"}
-    if args.subset in {"style", "deep"}:
+    if args.subset in {"style", "deep", "close"}:
         public["turns"] = [
             {
                 "turn_id": row.get("turn_id"),

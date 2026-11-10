@@ -169,6 +169,70 @@ def test_bad_candidates_are_guard_tests_not_model_quality(tmp_path, monkeypatch)
     assert second["buyer_visible_draft"] == first["buyer_visible_draft"]
 
 
+def test_close_suite_and_replay_does_not_inflate_rejections(tmp_path, monkeypatch):
+    from kefu_offline.fixtures.sim_logic_suite import close_suite
+
+    catalog = tmp_path / "catalog.yml"
+    write_catalog(catalog)
+    monkeypatch.setenv("KEFU_CATALOG_PATH", str(catalog))
+    monkeypatch.setenv("KEFU_REVIEW_PATH", str(tmp_path / "reviews.jsonl"))
+    monkeypatch.setenv("KEFU_MODEL_MODE", "openai")
+    monkeypatch.delenv("XIANYU_ALLOW_SEND", raising=False)
+    counts = suite_counts(close_suite())
+    assert counts["turns"] == 6
+    assert counts["expect_model"] == 5
+    assert counts["expect_rule"] == 1
+    summary = run_suite(
+        close_suite(),
+        model_client=EchoModel(),
+        max_model_calls=10,
+        timeout_budget_s=120,
+        checkpoint=tmp_path / "close.jsonl",
+    )
+    assert summary["failed"] == 0, json.dumps([row for row in summary["results"] if not row.get("ok")], ensure_ascii=False)
+    assert summary["model_invoked"] == 5
+    assert summary["model_rejected"] == 0
+    assert summary["inherited_guard"] == 0
+
+    class Pile:
+        def complete(self, messages):
+            return "80元，只换屏幕，工期当天，到店维修，电池另计。"
+
+    piled = [
+        {
+            "id": "pile",
+            "conversation_id": "chat-pile",
+            "category": "维修",
+            "turns": [
+                {
+                    "text": "换屏幕现在卖多少",
+                    "item_id": "sim-repair",
+                    "message_id": "same-price",
+                    "expect": {"contain": ["80元", "电池另计"], "absent": ["工期", "只换屏幕"], "model": True, "status": "pending_review"},
+                },
+                {
+                    "text": "换屏幕现在卖多少",
+                    "item_id": "sim-repair",
+                    "message_id": "same-price",
+                    "expect": {"contain": ["80元", "电池另计"], "absent": ["工期"], "model": False, "status": "pending_review"},
+                },
+            ],
+        }
+    ]
+    replay = run_suite(piled, model_client=Pile(), max_model_calls=5, checkpoint=tmp_path / "pile.jsonl")
+    assert replay["failed"] == 0, json.dumps([row for row in replay["results"] if not row.get("ok")], ensure_ascii=False)
+    assert replay["model_invoked"] == 1
+    assert replay["model_rejected"] == 1
+    assert replay["inherited_guard"] == 1
+    assert replay["guard_blocked"] == 1
+    second = replay["results"][1]
+    assert second["duplicate"] is True
+    assert second["model_rejected"] is False
+    assert second["reject_source"] == "cached_final"
+    assert second["inherited_model_rejected"] is True
+    assert "工期" not in second["final_draft"]
+
+
 def test_deep_suite_with_echo_model(tmp_path, monkeypatch):
     catalog = tmp_path / "catalog.yml"
     write_catalog(catalog)

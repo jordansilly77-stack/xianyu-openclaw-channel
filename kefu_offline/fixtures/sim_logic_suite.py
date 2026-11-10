@@ -389,6 +389,50 @@ def style_suite() -> list[dict]:
     ]
 
 
+def close_suite() -> list[dict]:
+    """最后一轮口吻回归。预期按该问到的事实写，不从引擎抄。"""
+    repair = _by_id("sim-repair")
+    jacket = _by_id("sim-jacket")
+    plant = _by_id("sim-plant")
+    printed = _by_id("sim-print")
+    return [
+        {
+            "id": "close-repair",
+            "conversation_id": "chat-close-repair",
+            "category": "维修",
+            "turns": [
+                _turn("换屏幕现在卖多少", repair["id"], ["80元", "电池另计"], ["只换屏幕", "工期", "到店维修", "当天", "包邮"], True),
+                _turn("把换屏幕的情况和价格一起说", None, ["80元", "电池另计", "只换屏幕", "工期", "当天"], ["成色没确认"], True),
+            ],
+        },
+        {
+            "id": "close-jacket",
+            "conversation_id": "chat-close-jacket",
+            "category": "服装",
+            "turns": [
+                _turn("外套还在吗", jacket["id"], [], ["卖出", "没了"], True, availability="in_stock"),
+            ],
+        },
+        {
+            "id": "close-plant",
+            "conversation_id": "chat-close-plant",
+            "category": "绿植",
+            "turns": [
+                _turn("把这盆的情况和价格一起说", plant["id"], ["35元", "同城自提"], ["成色没确认", "成色一般"], True),
+            ],
+        },
+        {
+            "id": "close-arrival",
+            "conversation_id": "chat-close-arrival",
+            "category": "3D定制",
+            "turns": [
+                _turn("打印件能退吗，多久到手", printed["id"], ["退款", "收到"], ["五天", "到手", "工期"], False, status="handoff"),
+                _turn("打印件多久做完", printed["id"], ["工期", "五天"], ["到手", "到货", "收到"], True),
+            ],
+        },
+    ]
+
+
 def deep_suite() -> list[dict]:
     """深测。预期按资料和买家该听到的事实写，不从回复引擎抄回。"""
     printed = _by_id("sim-print")
@@ -421,7 +465,7 @@ def deep_suite() -> list[dict]:
             "conversation_id": "chat-deep-repair",
             "category": "维修",
             "turns": [
-                _turn("换屏幕现在卖多少", repair["id"], ["80元"], ["包邮", "60元可以"], True),
+                _turn("换屏幕现在卖多少", repair["id"], ["80元", "电池另计"], ["包邮", "60元可以", "只换屏幕", "工期", "到店维修"], True),
                 _turn("把换屏幕的情况和价格一起说", None, ["80元", "电池另计", "只换屏幕", "工期", "当天", "到店维修"], ["在售", "包邮", "到手"], True, human=True),
                 _turn("两台一共多少", None, ["160元", "电池另计"], ["折扣", "优惠"], True),
                 _turn("换屏幕多久做完，能退吗", None, ["工期", "当天", "退款"], ["到手", "到货", "支持退款", "无条件"], True),
