@@ -77,10 +77,11 @@
     "text": "什么型号，几成新",
     "item_id": "ex-router",
     "expect": {
-      "status": "handoff",
-      "reason": "fact_unconfirmed",
+      "status": "pending_review",
+      "reason": "spec_quote",
       "matched_item_id": "ex-router",
       "send_allowed": false,
+      "must_contain": ["成色没确认"],
       "must_not_contain": ["310", "小米", "华为", "九成", "包邮"]
     }
   },

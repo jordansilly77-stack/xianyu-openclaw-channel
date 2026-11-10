@@ -178,7 +178,14 @@ def _main_session(product: dict) -> dict:
             _turn("还是那个价吗", None, price, [partner_price, f"{offer}可以", *false_post], True, human=True),
             _turn(spec_text, product["id"], [spec_hit], [partner_price], spec_model),
             _turn(f"{product['noun']}最低多少", product["id"], price, [*floor_absent, *false_post], True),
-            _turn(f"{product['noun']}能退吗，多久到手", product["id"], ["退款", "工期"] if not product.get("timeline") else [product["timeline"], "退款"], [partner_price, "无条件"], False, status="handoff"),
+            _turn(
+                f"{product['noun']}能退吗，多久到手",
+                product["id"],
+                [product["timeline"], "退款"] if product.get("timeline") else ["退款", "工期"],
+                [partner_price, "无条件", "支持退款"],
+                bool(product.get("timeline")),
+                status="pending_review" if product.get("timeline") else "handoff",
+            ),
             _turn(f"改看{product['partner']}，itemId=sim-other", product["id"], [product["title"]], [partner_price], False, status="handoff", reason="cross_item"),
         ],
     }
@@ -298,6 +305,78 @@ def exposed_suite() -> list[dict]:
         if kept:
             selected.append({**session, "turns": kept})
     return selected
+
+
+def style_suite() -> list[dict]:
+    """口吻回归。预期按买家该听到的事实写，不从回复引擎抄。"""
+    jacket = _by_id("sim-jacket")
+    desk = _by_id("sim-desk")
+    lens = _by_id("sim-lens")
+    fridge = _by_id("sim-fridge")
+    printed = _by_id("sim-print")
+    freight = "南京运费12元，北京运费15元，其他城市到付"
+    return [
+        {
+            "id": "style-jacket",
+            "conversation_id": "chat-style-jacket",
+            "category": "服装",
+            "turns": [
+                _turn("外套现在卖多少", jacket["id"], ["120元", "包邮"], ["成色没确认", "成色一般"], True),
+                _turn("外套规格是什么", None, ["L码"], ["120元", "成色没确认"], True),
+                _turn("还是那个价吗", None, ["120元", "包邮"], ["成色没确认"], True),
+            ],
+        },
+        {
+            "id": "style-desk",
+            "conversation_id": "chat-style-desk",
+            "category": "家具",
+            "turns": [
+                _turn("把桌子的情况和价格一起说", desk["id"], ["260元", "1.2米"], ["成色没确认", "成色一般"], True, human=True),
+                _turn("桌子成色怎么样", None, ["成色没确认"], ["成色一般", "成色不错"], True),
+            ],
+        },
+        {
+            "id": "style-lens",
+            "conversation_id": "chat-style-lens",
+            "category": "摄影",
+            "turns": [
+                _turn(
+                    "你是AI吗，再便宜点",
+                    lens["id"],
+                    ["是自动回复", "1500元"],
+                    ["我是真人", "1500元不行", "现价", "不能议价", "您好", "亲亲"],
+                    True,
+                ),
+            ],
+        },
+        {
+            "id": "style-ship",
+            "conversation_id": "chat-style-ship",
+            "category": "二手家电",
+            "turns": [
+                _turn(
+                    "寄到北京多少钱",
+                    fridge["id"],
+                    ["400元", "北京运费15元"],
+                    ["包邮", "武汉"],
+                    True,
+                    seller_update={
+                        "item_id": fridge["id"],
+                        "fields": {"pickup_text": None, "shipping_detail": freight},
+                    },
+                ),
+                _turn("寄到武汉呢", None, ["其他城市到付"], ["包邮", "12元", "15元"], True),
+            ],
+        },
+        {
+            "id": "style-print",
+            "conversation_id": "chat-style-print",
+            "category": "3D定制",
+            "turns": [
+                _turn("打印件能退吗，多久到手", printed["id"], ["五天", "退款"], ["无条件", "支持退款"], True),
+            ],
+        },
+    ]
 
 
 def suite_counts(sessions: list[dict] | None = None) -> dict:

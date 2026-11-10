@@ -382,13 +382,86 @@ def _asks_identity(text: str) -> bool:
     return any(phrase in folded for phrase in ("是不是ai", "你是ai", "是ai吗", "机器人", "真人"))
 
 
+def _destination(text: str) -> Optional[str]:
+    match = re.search(r"(?:寄到|发到|送到|邮到)([\u4e00-\u9fff]{2,12})", text)
+    if not match:
+        return None
+    token = match.group(1)
+    for suffix in ("多少钱", "多少", "怎么算", "怎么样", "运费", "邮费", "包邮", "吗", "呢", "吧"):
+        if token.endswith(suffix) and len(token) - len(suffix) >= 2:
+            return token[: -len(suffix)]
+    return token
+
+
+def _split_clauses(text: str) -> list[str]:
+    return [part.strip() for part in re.split(r"[，,；;。]", text) if part.strip()]
+
+
+def _clause_with(detail: str, token: str) -> Optional[str]:
+    for part in _split_clauses(detail):
+        if token in part:
+            return part
+    return None
+
+
+def _general_clause(detail: str) -> Optional[str]:
+    for part in _split_clauses(detail):
+        if any(word in part for word in ("其他", "外地", "其余", "别的", "全国", "一律")):
+            return part
+    return None
+
+
+def _ship_fact(item: CatalogItem, text: str, *, price_already: bool) -> tuple[Optional[str], Optional[str]]:
+    """按已有运费事实回答。不靠城市白名单，也不给没写明的地方报价。"""
+    if item.shipping and "包邮" in item.shipping:
+        if price_already:
+            return None, None
+        return "包邮。", None
+    if item.pickup_text:
+        return _sentence(f"不邮寄，{item.pickup_text}"), None
+    if item.shipping_detail:
+        dest = _destination(text)
+        if dest:
+            quoted = _clause_with(item.shipping_detail, dest)
+            if quoted:
+                return _sentence(quoted), None
+            general = _general_clause(item.shipping_detail)
+            if general:
+                return _sentence(general), None
+            return None, "shipping_unconfirmed"
+        return _sentence(item.shipping_detail), None
+    if item.shipping:
+        return _sentence(item.shipping), None
+    return None, "shipping_unconfirmed"
+
+
+def _known_situation(item: CatalogItem) -> list[str]:
+    """情况综述只用已经写明的事实，不补未知字段。"""
+    bits: list[str] = []
+    if _has_grade(item) and item.condition_text:
+        bits.append(_sentence(item.condition_text))
+    if item.specs_text:
+        bits.append(_sentence(item.specs_text))
+    if item.function_text:
+        bits.append(_sentence(item.function_text))
+    if item.scope_text:
+        bits.append(_sentence(item.scope_text))
+    if item.stock_text and item.stock_text != "已售出":
+        bits.append(_sentence(item.stock_text))
+    if item.pickup_text:
+        bits.append(_sentence(item.pickup_text))
+    return bits
+
+
 def _gap_sentence(gaps: list[str]) -> str:
     labels = {
         "refund_unconfirmed": "退款",
         "timeline_unconfirmed": "工期",
         "scope_unconfirmed": "范围",
         "fact_unconfirmed": "型号成色",
+        "model_unconfirmed": "型号",
         "price_unconfirmed": "价格",
+        "shipping_unconfirmed": "运费",
     }
     names = [labels[gap] for gap in gaps if gap in labels]
     if not names:
@@ -447,24 +520,11 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
         parts.append(_sentence(item.stock_text))
     if any(word in text for word in SHIP_WORDS):
         asked = True
-        if item.shipping and "包邮" in item.shipping and (flags["price"] or refused_offer):
-            pass
-        elif item.shipping and "包邮" in item.shipping:
-            parts.append("包邮。")
-        elif item.pickup_text:
-            parts.append(_sentence(f"不邮寄，{item.pickup_text}"))
-        elif item.shipping_detail:
-            named = [city for city in ("北京", "上海", "广州", "深圳", "杭州") if city in text]
-            if named and named[0] in item.shipping_detail:
-                parts.append(_sentence(item.shipping_detail))
-            elif named:
-                gaps.append("scope_unconfirmed")
-            else:
-                parts.append("寄到哪？")
-        elif item.shipping:
-            parts.append(_sentence(item.shipping))
-        else:
-            gaps.append("scope_unconfirmed")
+        sentence, gap = _ship_fact(item, text, price_already=bool(flags["price"] or refused_offer))
+        if sentence:
+            parts.append(sentence)
+        if gap:
+            gaps.append(gap)
     if any(word in text for word in ("成色", "新旧", "几成")):
         asked = True
         if _has_grade(item):
@@ -510,6 +570,14 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
             parts.append(_price_sentence(item, text, refuse=refused_offer))
         else:
             gaps.append("price_unconfirmed")
+    if "情况" in text:
+        asked = True
+        covered = "".join(parts)
+        for bit in _known_situation(item):
+            if bit.strip("。") not in covered:
+                parts.append(bit)
+                covered += bit
+    answered = any(part.strip("。") not in {"寄到哪？"} for part in parts)
     if gaps:
         parts.append(_gap_sentence(gaps))
     draft = _tight(parts)
@@ -519,7 +587,7 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
             return "pending_review", "ack", f"在，{_price_sentence(item, text, refuse=False)}", []
         return "pending_review", "ack", f"在，{item.title}。", []
 
-    if gaps:
+    if gaps and not answered:
         return "handoff", gaps[0], draft, gaps
     if wants_price or refused_offer:
         reason = "listed_price"
@@ -533,16 +601,16 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
         reason = "refund_quote"
     else:
         reason = "ack"
-    return "pending_review", reason, draft, []
+    return "pending_review", reason, draft, gaps
 
 
 def _tight(parts: list[str]) -> str:
     cleaned = [part.strip() for part in parts if part and part.strip()]
     if not cleaned:
         return ""
-    if cleaned[0] == "是自动回复。":
+    if cleaned[0].rstrip("。") == "是自动回复" and len(cleaned) > 1:
         rest = "，".join(part.rstrip("。") for part in cleaned[1:])
-        return "是自动回复。" + (f"{rest}。" if rest else "")
+        return f"是自动回复，{rest}。"
     body = "，".join(part.rstrip("。") for part in cleaned)
     return body if body.endswith("。") else body + "。"
 
@@ -562,6 +630,7 @@ def _audit(reason: str, generator: str) -> str:
         "timeline_unconfirmed": "工期没有记录。",
         "refund_unconfirmed": "没有退款授权。",
         "scope_unconfirmed": "服务或商品范围没有记录。",
+        "shipping_unconfirmed": "这个地方的运费没有记录。",
         "fact_unconfirmed": "型号和成色没有记录。",
         "empty": "没有可回复的正文。",
     }
@@ -595,6 +664,16 @@ def draft_safety_problems(draft: str, decision: Decision, catalog: Catalog, buye
     )
 
 
+def _quoted_freight(draft: str, token: str, trusted_text: str) -> bool:
+    """运费金额只有整句都写在资料里才算数，不能把别的城市的数字挪过来。"""
+    if not trusted_text or token not in draft:
+        return False
+    for clause in _split_clauses(draft):
+        if token in clause and len(clause) > len(token) and clause in trusted_text:
+            return True
+    return False
+
+
 def text_safety_problems(
     draft: str,
     *,
@@ -626,6 +705,8 @@ def text_safety_problems(
             remainder = draft.replace(refusal, "", 1)
             if not re.search(rf"(?<!\d){re.escape(token)}元", remainder):
                 continue
+        if _quoted_freight(draft, f"{token}元", trusted_text):
+            continue
         problems.append(f"unapproved_price:{raw}")
     return problems
 

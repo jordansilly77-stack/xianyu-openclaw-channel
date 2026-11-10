@@ -90,11 +90,16 @@ def reeval_cli(args) -> int:
 
 
 def run_suite_cli(args) -> int:
-    from kefu_offline.fixtures.sim_logic_suite import build_suite, exposed_suite, suite_counts, write_catalog
+    from kefu_offline.fixtures.sim_logic_suite import build_suite, exposed_suite, style_suite, suite_counts, write_catalog
 
-    sessions = exposed_suite() if args.subset == "exposed" else build_suite()
+    if args.subset == "exposed":
+        sessions = exposed_suite()
+    elif args.subset == "style":
+        sessions = style_suite()
+    else:
+        sessions = build_suite()
     counts = suite_counts(sessions)
-    full = args.subset != "exposed"
+    full = args.subset not in {"exposed", "style"}
     if full and (counts["turns"] < 200 or counts["sessions"] < 30 or counts["expect_model"] < 120 or counts["categories"] < 10):
         json.dump({"ok": False, "counts": counts}, sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")
@@ -131,6 +136,19 @@ def run_suite_cli(args) -> int:
         resume=args.resume,
     )
     public = {key: value for key, value in summary.items() if key != "results"}
+    if args.subset == "style":
+        public["turns"] = [
+            {
+                "turn_id": row.get("turn_id"),
+                "text": row.get("text"),
+                "model_candidate": row.get("model_candidate"),
+                "reject_reasons": row.get("reject_reasons") or [],
+                "final_draft": row.get("final_draft"),
+                "ok": row.get("ok"),
+                "failures": row.get("failures") or [],
+            }
+            for row in summary["results"]
+        ]
     public["transport"] = transport
     public["checkpoint"] = str(checkpoint)
     public["simulated"] = True

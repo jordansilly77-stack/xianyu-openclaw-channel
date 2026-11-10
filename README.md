@@ -87,6 +87,12 @@ python -m kefu_offline --reeval data/suite_results.jsonl --reeval-out data/suite
 
 `--reeval-out` 不能写成原 checkpoint。这条命令不需要模型环境变量。
 
+口吻子集不进 204 套件。先跑这个，再跑全套。输出里每轮有 `model_candidate`、`reject_reasons` 和 `final_draft`。
+
+```bash
+python -m kefu_offline --suite --subset style --max-model-calls 20 --checkpoint data/suite_style.jsonl
+```
+
 先跑上次 Mac 暴露的几段：
 
 ```bash
