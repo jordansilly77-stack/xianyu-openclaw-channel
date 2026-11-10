@@ -13,7 +13,8 @@ from typing import Optional
 from kefu_offline.engine import FIXTURE_DIR, load_catalog, run_replay
 from kefu_offline.http_api import list_reviews
 from kefu_offline.live import production_preview_turn
-from kefu_offline.model_client import missing_model_env
+from kefu_offline.model_client import OpenAICompatibleClient, missing_model_env
+from kefu_offline.suite_runner import EchoModel, run_suite
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,8 +25,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--replay", type=Path, default=None)
     parser.add_argument("--generator", choices=("rules", "mock"), default="rules")
     parser.add_argument("--mac-preview", action="store_true")
+    parser.add_argument("--suite", action="store_true")
+    parser.add_argument("--fake-model", action="store_true")
+    parser.add_argument("--max-model-calls", type=int, default=180)
+    parser.add_argument("--timeout-budget", type=float, default=600)
+    parser.add_argument("--checkpoint", type=Path, default=None)
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--list-reviews", action="store_true")
     args = parser.parse_args(argv)
+    if args.suite:
+        return run_suite_cli(args)
     if args.mac_preview:
         return mac_preview(args.catalog, args.replay)
     if args.list_reviews:
@@ -49,6 +58,54 @@ def main(argv: list[str] | None = None) -> int:
     json.dump(summary, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
     return 1 if failures else 0
+
+
+def run_suite_cli(args) -> int:
+    from kefu_offline.fixtures.sim_logic_suite import build_suite, suite_counts, write_catalog
+
+    counts = suite_counts()
+    if counts["turns"] < 200 or counts["sessions"] < 30 or counts["expect_model"] < 120 or counts["categories"] < 10:
+        json.dump({"ok": False, "counts": counts}, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return 1
+    catalog = args.catalog or Path("data/sim_suite_catalog.yml")
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    write_catalog(catalog)
+    os.environ["KEFU_CATALOG_PATH"] = str(catalog)
+    os.environ.pop("XIANYU_ALLOW_SEND", None)
+    checkpoint = args.checkpoint or Path("data/suite_results.jsonl")
+    if args.fake_model:
+        client = EchoModel()
+        os.environ["KEFU_MODEL_MODE"] = "openai"
+        transport = "fake-http"
+    else:
+        missing = missing_model_env()
+        if missing:
+            json.dump({"ok": False, "missing_env": missing, "send_allowed": False}, sys.stdout, ensure_ascii=False, indent=2)
+            sys.stdout.write("\n")
+            return 2
+        os.environ["KEFU_MODEL_MODE"] = "openai"
+        client = OpenAICompatibleClient.from_env()
+        transport = "openai-compatible"
+    if args.resume and checkpoint.exists():
+        pass
+    elif checkpoint.exists() and not args.resume:
+        checkpoint.unlink()
+    summary = run_suite(
+        build_suite(),
+        model_client=client,
+        max_model_calls=args.max_model_calls,
+        timeout_budget_s=args.timeout_budget,
+        checkpoint=checkpoint,
+        resume=args.resume,
+    )
+    public = {key: value for key, value in summary.items() if key != "results"}
+    public["transport"] = transport
+    public["checkpoint"] = str(checkpoint)
+    public["simulated"] = True
+    json.dump(public, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    return 0 if summary["failed"] == 0 else 1
 
 
 def case_to_wire(case: dict) -> dict:

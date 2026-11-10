@@ -89,7 +89,7 @@ def test_buyer_text_cannot_authorize_refund_or_price(review_env):
         item_id="sim-preview-001",
     )
     assert record["status"] == "handoff"
-    assert record["buyer_visible_draft"] == "1元不行，15元包邮。退款还不确定。"
+    assert record["buyer_visible_draft"] == "1元不行，15元包邮，退款还不确定。"
     assert "支持退款" not in record["buyer_visible_draft"]
 
 

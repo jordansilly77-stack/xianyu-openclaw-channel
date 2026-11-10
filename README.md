@@ -63,6 +63,22 @@ python -m kefu_offline --mac-preview \
 
 不带 `--replay` 时仍是原来的单条预览。批量里的每一条都走 `production_preview_turn`。规则已经判定待人工的例子不会再调模型。输出里有草稿、是否调用模型、候选是否采用、规则原因、耗时和发送关闭状态。
 
+跨品类多轮套件也走同一条预览路径。云端只能加 `--fake-model`，这不是 Mac 上的真实模型验收。父在 Mac 上拿现成网关跑时不要加这个参数，请求数受 `--max-model-calls` 限制，默认 180。
+
+```bash
+python -m kefu_offline --suite --fake-model --max-model-calls 180 --checkpoint data/suite_results.jsonl
+```
+
+```bash
+export OPENAI_BASE_URL="http://127.0.0.1:3425/v1"
+export OPENAI_MODEL="group/free-first"
+export OPENAI_API_KEY="从本机正式配置读取"
+export OPENAI_TIMEOUT="30"
+python -m kefu_offline --suite --max-model-calls 180 --timeout-budget 600 --checkpoint data/suite_results.jsonl
+```
+
+终端会打印会话数、轮次数、`model_invoked`、`rule_skipped`、`failed`。失败时退出码不是 0，逐轮结果留在 checkpoint 里。`--resume` 只跳过已经成功的轮次，不会自动重试失败轮。`human_review` 大于 0 的轮次只做了硬性断言，语气还要人看。
+
 这条命令使用模拟商品和模拟买家消息，走生产用的商品识别、规则和模型调用，不打开闲鱼连接。说明见 `docs/KEFU_OFFLINE_RECOVERY.md`。
 
 ## 🚀 快速开始

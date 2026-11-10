@@ -14,12 +14,16 @@ from typing import Any, Optional
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 
-REFUND_WORDS = ("退款", "退货", "包退", "无理由")
+REFUND_WORDS = ("退款", "退货", "包退", "无理由", "能退")
 TIMELINE_WORDS = ("多久", "几天", "工期", "什么时候", "马上", "今天", "明天", "小时")
 DISCOUNT_WORDS = ("便宜", "优惠", "最低", "底价", "少点", "能少", "刀")
 SCOPE_WORDS = ("范围", "包含", "做哪些", "能不能做", "包不包括", "做什么")
 SPEC_WORDS = ("型号", "成色", "几成", "牌子", "品牌")
-PRICE_WORDS = ("多少钱", "价格", "怎么卖", "收费", "包邮")
+PRICE_WORDS = ("多少钱", "价格", "怎么卖", "收费", "包邮", "那个价", "刚才的价", "还是一样", "什么价", "怎么卖", "开价", "报价")
+SHIP_WORDS = ("邮费", "运费", "邮寄", "自提", "寄到")
+STOCK_WORDS = ("还在吗", "有货", "卖出", "还有吗")
+QTY_RE = re.compile(r"(\d+|[两三四五])\s*(件|套|本)")
+CN_QTY = {"两": 2, "三": 3, "四": 4, "五": 5}
 
 PROMISE_PATTERNS = (
     r"支持退款",
@@ -70,6 +74,15 @@ class CatalogItem:
     refund_policy: Optional[str] = None
     description: Optional[str] = None
     floor_price_yuan: Optional[float] = None
+    currency: str = "元"
+    stock_text: Optional[str] = None
+    pickup_text: Optional[str] = None
+    specs_text: Optional[str] = None
+    accessories_text: Optional[str] = None
+    bundle_text: Optional[str] = None
+    shipping_detail: Optional[str] = None
+    prerequisites_text: Optional[str] = None
+    addons_text: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -307,15 +320,46 @@ def _offer_amount(text: str, item: CatalogItem) -> Optional[float]:
     return None
 
 
+def _money(item: CatalogItem, amount: float) -> str:
+    token = _format_yuan(amount)
+    if (item.currency or "元") == "元":
+        return f"{token}元"
+    return f"{token}{item.currency}"
+
+
+def _listed_phrase(item: CatalogItem) -> str:
+    stated = _money(item, item.listed_price_yuan or 0)
+    if item.shipping and "包邮" in item.shipping:
+        return f"{stated}包邮"
+    if item.shipping:
+        return f"{stated}，{item.shipping}"
+    return stated
+
+
 def _price_sentence(item: CatalogItem, text: str, *, refuse: bool) -> str:
-    price = _format_yuan(item.listed_price_yuan or 0)
-    stated = f"{price}元{item.shipping}" if item.shipping else f"{price}元"
+    stated = _listed_phrase(item)
     if refuse:
         offer = _offer_amount(text, item)
         if offer is not None:
-            return _sentence(f"{_format_yuan(offer)}元不行，{stated}")
+            return _sentence(f"{_money(item, offer)}不行，{stated}")
         return _sentence(stated)
+    total = _bundle_total(text, item)
+    if total is not None:
+        return _sentence(f"一共{_money(item, total)}")
     return _sentence(stated)
+
+
+def _bundle_total(text: str, item: CatalogItem) -> Optional[float]:
+    if item.listed_price_yuan is None or not any(word in text for word in ("一共", "总共", "加起来")):
+        return None
+    match = QTY_RE.search(text)
+    if not match:
+        return None
+    raw = match.group(1)
+    count = CN_QTY.get(raw, int(raw) if raw.isdigit() else 0)
+    if count < 2:
+        return None
+    return item.listed_price_yuan * count
 
 
 def _asks_identity(text: str) -> bool:
@@ -347,6 +391,8 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
         if any(word in text for word in PRICE_WORDS) or _conflicting_price_number_text(text):
             return "handoff", "unknown_item", "没对上这件，价格我说不准。", ["unknown_item"]
         return "handoff", "unknown_item", "没对上这件。", ["unknown_item"]
+    if item.stock_text == "已售出":
+        return "pending_review", "stock_sold", "已经卖出了。", []
     if not text.strip():
         return "handoff", "empty", "你想问什么？", ["empty"]
     if foreign_item_ids(text, item, catalog):
@@ -379,6 +425,56 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
             parts.append(_sentence(item.scope_text if "。" in item.scope_text else f"{item.scope_text}"))
         else:
             gaps.append("scope_unconfirmed")
+    if any(word in text for word in STOCK_WORDS) and item.stock_text and item.stock_text != "已售出":
+        asked = True
+        parts.append(_sentence(item.stock_text))
+    if any(word in text for word in SHIP_WORDS):
+        asked = True
+        if item.shipping and "包邮" in item.shipping and (flags["price"] or refused_offer):
+            pass
+        elif item.shipping and "包邮" in item.shipping:
+            parts.append("包邮。")
+        elif item.pickup_text:
+            parts.append(_sentence(f"不邮寄，{item.pickup_text}"))
+        elif item.shipping_detail:
+            named = [city for city in ("北京", "上海", "广州", "深圳", "杭州") if city in text]
+            if named and named[0] in item.shipping_detail:
+                parts.append(_sentence(item.shipping_detail))
+            elif named:
+                gaps.append("scope_unconfirmed")
+            else:
+                parts.append("寄到哪？")
+        elif item.shipping:
+            parts.append(_sentence(item.shipping))
+        else:
+            gaps.append("scope_unconfirmed")
+    if any(word in text for word in ("成色", "新旧", "几成")) and item.condition_text:
+        asked = True
+        parts.append(_sentence(item.condition_text))
+    elif any(word in text for word in ("成色", "新旧", "几成")):
+        asked = True
+        gaps.append("fact_unconfirmed")
+    if any(word in text for word in ("配件", "充电器", "前后盖")) and item.accessories_text:
+        asked = True
+        parts.append(_sentence(item.accessories_text))
+    if any(word in text for word in ("几本", "套装")) and item.bundle_text:
+        asked = True
+        parts.append(_sentence(item.bundle_text))
+    if any(word in text for word in ("尺寸", "尺码", "规格", "多大")) and item.specs_text:
+        asked = True
+        parts.append(_sentence(item.specs_text))
+    elif any(word in text for word in ("尺寸", "尺码", "规格", "多大")):
+        asked = True
+        gaps.append("fact_unconfirmed")
+    if any(word in text for word in ("前提", "依赖", "要准备")) and item.prerequisites_text:
+        asked = True
+        parts.append(_sentence(item.prerequisites_text))
+    if any(word in text for word in ("增项", "另加", "电池另")) and item.addons_text:
+        asked = True
+        parts.append(_sentence(item.addons_text))
+    if "密钥" in text or "API_KEY" in text.upper():
+        asked = True
+        parts.append("密钥不能发。")
     if flags["spec"]:
         asked = True
         bits = []
@@ -394,12 +490,11 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
         asked = True
         if item.listed_price_yuan is not None:
             parts.append(_price_sentence(item, text, refuse=refused_offer))
-        elif item.floor_price_yuan is not None and flags["discount"]:
-            parts.append(f"底价{_format_yuan(item.floor_price_yuan)}元。")
         else:
             gaps.append("price_unconfirmed")
     if gaps:
         parts.append(_gap_sentence(gaps))
+    draft = _tight(parts)
 
     if not asked:
         if item.listed_price_yuan is not None:
@@ -407,9 +502,9 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
         return "pending_review", "ack", f"在，{item.title}。", []
 
     if gaps:
-        return "handoff", gaps[0], "".join(parts), gaps
+        return "handoff", gaps[0], draft, gaps
     if flags["price"] or refused_offer:
-        reason = "floor_quote" if item.floor_price_yuan is not None and item.listed_price_yuan is None else "listed_price"
+        reason = "listed_price"
     elif flags["scope"]:
         reason = "scope_quote"
     elif flags["timeline"]:
@@ -420,7 +515,18 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
         reason = "refund_quote"
     else:
         reason = "ack"
-    return "pending_review", reason, "".join(parts), []
+    return "pending_review", reason, draft, []
+
+
+def _tight(parts: list[str]) -> str:
+    cleaned = [part.strip() for part in parts if part and part.strip()]
+    if not cleaned:
+        return ""
+    if cleaned[0] == "是自动回复。":
+        rest = "，".join(part.rstrip("。") for part in cleaned[1:])
+        return "是自动回复。" + (f"{rest}。" if rest else "")
+    body = "，".join(part.rstrip("。") for part in cleaned)
+    return body if body.endswith("。") else body + "。"
 
 
 def _audit(reason: str, generator: str) -> str:
@@ -499,6 +605,8 @@ def text_safety_problems(
             remainder = draft.replace(refusal, "", 1)
             if not re.search(rf"(?<!\d){re.escape(token)}元", remainder):
                 continue
+        if prices and "一共" in draft and any(abs(value - price * count) <= 0.001 for price in prices for count in range(2, 10)):
+            continue
         problems.append(f"unapproved_price:{raw}")
     return problems
 

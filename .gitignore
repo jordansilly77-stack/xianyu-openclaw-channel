@@ -1,6 +1,8 @@
 node_modules/
 data/kefu_reviews.jsonl
 data/kefu_mac_preview.jsonl
+data/suite_results.jsonl
+data/sim_suite_catalog.yml
 dist/
 *.js
 *.d.ts
