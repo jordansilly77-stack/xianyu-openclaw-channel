@@ -39,6 +39,7 @@ class BudgetModel:
 
 _IN_STOCK = ("在售", "在的", "还有", "有的")
 _SOLD = ("卖出", "没了", "售出")
+JUDGMENT_VERSION = "2026-11-10-price-vs-delivery"
 
 
 def evaluate_turn(record: dict[str, Any], expect: dict[str, Any]) -> list[str]:
@@ -77,6 +78,101 @@ def evaluate_turn(record: dict[str, Any], expect: dict[str, Any]) -> list[str]:
     if expect.get("one_question") and draft.count("？") > 1:
         failures.append("more than one question")
     return failures
+
+
+def reevaluate_checkpoint(path: Path, sessions: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
+    """用当前断言重读已有 checkpoint。不调用模型，不改原文件。"""
+    if sessions is None:
+        from kefu_offline.fixtures.sim_logic_suite import build_suite
+
+        sessions = build_suite()
+    expects: dict[str, dict[str, Any]] = {}
+    for session in sessions:
+        for index, turn in enumerate(session["turns"], start=1):
+            expects[f"{session['id']}-{index}"] = turn
+    source = Path(path)
+    raw = source.read_bytes()
+    rows = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
+    original_failed = 0
+    original_final_failed = 0
+    reeval_failed = 0
+    flipped: list[dict[str, Any]] = []
+    still_failed: list[dict[str, Any]] = []
+    new_failed: list[dict[str, Any]] = []
+    unmatched: list[str] = []
+    for row in rows:
+        stored_fail = _stored_failed(row)
+        if stored_fail:
+            original_failed += 1
+        if _stored_final_failed(row):
+            original_final_failed += 1
+        turn_id = str(row.get("turn_id") or "")
+        turn = expects.get(turn_id)
+        if turn is None:
+            unmatched.append(turn_id)
+            continue
+        draft = row.get("final_draft")
+        if draft is None:
+            draft = row.get("draft")
+        if draft is None:
+            draft = row.get("buyer_visible_draft") or ""
+        record = {
+            "buyer_visible_draft": draft,
+            "status": row.get("status"),
+            "reason": row.get("reason"),
+            "model_invoked": row.get("model_invoked"),
+            "send_allowed": row.get("send_allowed"),
+            "transport_send": bool(row.get("transport_send")),
+        }
+        failures = evaluate_turn(record, turn["expect"])
+        if failures:
+            reeval_failed += 1
+        item = {
+            "turn_id": turn_id,
+            "text": row.get("text") or turn.get("text"),
+            "draft": draft,
+            "original_failures": list(row.get("failures") or []),
+            "reeval_failures": failures,
+        }
+        if stored_fail and not failures:
+            flipped.append(item)
+        elif stored_fail and failures:
+            still_failed.append(item)
+        elif not stored_fail and failures:
+            new_failed.append(item)
+    if source.read_bytes() != raw:
+        raise RuntimeError("reeval must not modify the checkpoint")
+    reeval_exit = 0 if reeval_failed == 0 and not unmatched else 1
+    return {
+        "judgment_version": JUDGMENT_VERSION,
+        "source_checkpoint": str(source),
+        "source_bytes": len(raw),
+        "source_mutated": False,
+        "model_calls": 0,
+        "turns": len(rows),
+        "unmatched": unmatched,
+        "original": {
+            "failed": original_failed,
+            "final_failed": original_final_failed,
+            "exit_code": 0 if original_failed == 0 else 1,
+        },
+        "reeval": {"failed": reeval_failed, "exit_code": reeval_exit},
+        "flipped_to_pass": flipped,
+        "still_failed": still_failed,
+        "new_failed": new_failed,
+    }
+
+
+def _stored_failed(row: dict[str, Any]) -> bool:
+    if "ok" in row:
+        return not bool(row.get("ok"))
+    return bool(row.get("failures"))
+
+
+def _stored_final_failed(row: dict[str, Any]) -> bool:
+    if "final_ok" in row:
+        return not bool(row.get("final_ok"))
+    return _stored_failed(row)
 
 
 def run_suite(

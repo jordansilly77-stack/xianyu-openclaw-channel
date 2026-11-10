@@ -14,7 +14,7 @@ from kefu_offline.engine import FIXTURE_DIR, load_catalog, run_replay
 from kefu_offline.http_api import list_reviews
 from kefu_offline.live import production_preview_turn
 from kefu_offline.model_client import OpenAICompatibleClient, missing_model_env
-from kefu_offline.suite_runner import EchoModel, run_suite
+from kefu_offline.suite_runner import EchoModel, reevaluate_checkpoint, run_suite
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,8 +32,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--subset", default="")
+    parser.add_argument("--reeval", type=Path, default=None)
+    parser.add_argument("--reeval-out", type=Path, default=None)
     parser.add_argument("--list-reviews", action="store_true")
     args = parser.parse_args(argv)
+    if args.reeval:
+        return reeval_cli(args)
     if args.suite:
         return run_suite_cli(args)
     if args.mac_preview:
@@ -59,6 +63,30 @@ def main(argv: list[str] | None = None) -> int:
     json.dump(summary, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
     return 1 if failures else 0
+
+
+def reeval_cli(args) -> int:
+    source = Path(args.reeval)
+    if args.reeval_out and Path(args.reeval_out).resolve() == source.resolve():
+        json.dump(
+            {"ok": False, "error": "reeval-out must not replace the source checkpoint", "model_calls": 0},
+            sys.stdout,
+            ensure_ascii=False,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+        return 2
+    before = source.read_bytes()
+    report = reevaluate_checkpoint(source)
+    if source.read_bytes() != before:
+        raise RuntimeError("reeval must not modify the checkpoint")
+    text = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    if args.reeval_out:
+        out = Path(args.reeval_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+    sys.stdout.write(text)
+    return int(report["reeval"]["exit_code"])
 
 
 def run_suite_cli(args) -> int:

@@ -79,6 +79,14 @@ python -m kefu_offline --suite --max-model-calls 180 --timeout-budget 600 --chec
 
 终端会打印 `sessions`、`turns`、`model_invoked`、`rule_skipped`、`failed`、`guard_blocked`、`model_output_rejected`、`human_review`。`guard_blocked` 是坏候选被挡住，不是模型答对。checkpoint 里的 `model_candidate` 和 `reject_reasons` 只在模拟套件里保留。失败时退出码不是 0。`--resume` 只跳过已经成功的轮次。
 
+已有 checkpoint 可以按当前断言重评，不再请求模型，也不改原日志。原跑的 `failed` 留在输出的 `original` 里；新分数在 `reeval`。判定版本是 `judgment_version`。
+
+```bash
+python -m kefu_offline --reeval data/suite_results.jsonl --reeval-out data/suite_reeval.json
+```
+
+`--reeval-out` 不能写成原 checkpoint。这条命令不需要模型环境变量。
+
 先跑上次 Mac 暴露的几段：
 
 ```bash

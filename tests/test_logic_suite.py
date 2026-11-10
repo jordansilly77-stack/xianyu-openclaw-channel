@@ -165,6 +165,136 @@ def test_sold_reply_that_says_available_is_blocked(tmp_path, monkeypatch):
     assert evaluate_turn(sold, {"model": True, "availability": "sold", "contain": ["卖出"], "absent": ["在的"]}) == []
 
 
+def _session_turns(session_id: str) -> list[dict]:
+    return next(session["turns"] for session in build_suite() if session["id"] == session_id)
+
+
+def _draft(text: str, *, model: bool = True, status: str = "pending_review") -> dict:
+    return {
+        "status": status,
+        "buyer_visible_draft": text,
+        "model_invoked": model,
+        "send_allowed": False,
+        "transport_send": False,
+    }
+
+
+def test_price_questions_do_not_require_unrelated_delivery_text():
+    deploy = _session_turns("sim-deploy-main")
+    by_text = {turn["text"]: turn["expect"] for turn in deploy}
+    for text in ("部署现在卖多少", "还是那个价吗", "部署最低多少"):
+        expect = by_text[text]
+        assert expect["contain"] == ["200元"]
+        assert "不寄实物" not in expect["contain"]
+        assert "包邮" in expect["absent"]
+        assert evaluate_turn(_draft("200元。"), expect) == []
+    bargain = by_text["150块能出这部署吗"]
+    assert bargain["contain"] == ["150元不行", "200元"]
+    assert bargain["negation"] is True
+    assert "不寄实物" not in bargain["contain"]
+    assert evaluate_turn(_draft("150元不行，200元。"), bargain) == []
+    ship = by_text["部署邮寄怎么算"]
+    assert ship["contain"] == ["不寄实物"]
+    assert "包邮" in ship["absent"]
+    assert evaluate_turn(_draft("不寄实物。"), ship) == []
+    summary = next(turn for turn in _session_turns("sim-deploy-next") if "情况和价格" in turn["text"])["expect"]
+    assert summary["contain"] == ["200元", "不寄实物"]
+    assert evaluate_turn(_draft("200元，不寄实物。"), summary) == []
+    assert evaluate_turn(_draft("200元。"), summary)
+    code_price = next(turn for turn in _session_turns("sim-code-main") if turn["text"] == "激活码现在卖多少")["expect"]
+    assert code_price["contain"] == ["30元"]
+    assert "网盘发码" not in code_price["contain"]
+    code_ship = next(turn for turn in _session_turns("sim-code-main") if "邮寄" in turn["text"])["expect"]
+    assert code_ship["contain"] == ["网盘发码"]
+    assert "只部署Docker" in by_text["部署范围包括哪些"]["contain"]
+    assert "自备服务器" in by_text["部署要准备什么"]["contain"]
+    for session in build_suite():
+        for turn in session["turns"]:
+            if any(token in turn["text"] for token in ("邮寄", "情况和价格", "再说一遍刚才那条")):
+                continue
+            contain = turn["expect"]["contain"]
+            assert "不寄实物" not in contain
+            assert "网盘发码" not in contain
+            assert "200元，不寄实物" not in contain
+
+
+def test_deploy_assertions_block_wrong_price_and_invented_postage():
+    deploy = {turn["text"]: turn["expect"] for turn in _session_turns("sim-deploy-main")}
+    price = deploy["部署现在卖多少"]
+    bargain = deploy["150块能出这部署吗"]
+    ship = deploy["部署邮寄怎么算"]
+    assert evaluate_turn(_draft("150元。"), price)
+    assert evaluate_turn(_draft("200元包邮。"), price)
+    assert evaluate_turn(_draft("150元可以。"), bargain)
+    assert evaluate_turn(_draft("150元不行，200元包邮。"), bargain)
+    assert any("missing negation" in item or "forbidden" in item or "missing" in item for item in evaluate_turn(_draft("150元可以。"), bargain))
+    assert evaluate_turn(_draft("包邮。"), ship)
+    assert evaluate_turn(_draft("200元。"), ship)
+    assert evaluate_turn(_draft("不寄实物，包邮。"), ship)
+
+
+def test_reeval_keeps_original_failures_and_does_not_call_model(tmp_path, monkeypatch):
+    from kefu_offline.__main__ import main
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    checkpoint = tmp_path / "suite_results.jsonl"
+    rows = [
+        _checkpoint("sim-deploy-main-2", "部署现在卖多少", "200元。", False),
+        _checkpoint("sim-deploy-main-4", "150块能出这部署吗", "150元不行，200元。", False),
+        _checkpoint("sim-deploy-main-5", "还是那个价吗", "200元。", False),
+        _checkpoint("sim-deploy-main-7", "部署最低多少", "200元。", False),
+        _checkpoint("sim-deploy-main-3", "部署邮寄怎么算", "不寄实物。", True),
+    ]
+    checkpoint.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+    before = checkpoint.read_bytes()
+    out = tmp_path / "suite_reeval.json"
+    code = main(["--reeval", str(checkpoint), "--reeval-out", str(out), "--suite"])
+    assert checkpoint.read_bytes() == before
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert code == 0
+    assert report["judgment_version"] == "2026-11-10-price-vs-delivery"
+    assert report["model_calls"] == 0
+    assert report["source_mutated"] is False
+    assert report["original"]["failed"] == 4
+    assert report["original"]["final_failed"] == 4
+    assert report["original"]["exit_code"] == 1
+    assert report["reeval"]["failed"] == 0
+    assert report["reeval"]["exit_code"] == 0
+    assert {item["turn_id"] for item in report["flipped_to_pass"]} == {
+        "sim-deploy-main-2",
+        "sim-deploy-main-4",
+        "sim-deploy-main-5",
+        "sim-deploy-main-7",
+    }
+    assert report["new_failed"] == []
+    blocked = tmp_path / "blocked.jsonl"
+    blocked.write_text(
+        json.dumps(_checkpoint("sim-deploy-main-2", "部署现在卖多少", "200元包邮。", True), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    assert main(["--reeval", str(blocked)]) == 1
+    same = main(["--reeval", str(checkpoint), "--reeval-out", str(checkpoint)])
+    assert same == 2
+    assert checkpoint.read_bytes() == before
+
+
+def _checkpoint(turn_id: str, text: str, draft: str, ok: bool) -> dict:
+    return {
+        "turn_id": turn_id,
+        "text": text,
+        "draft": draft,
+        "final_draft": draft,
+        "status": "pending_review",
+        "model_invoked": True,
+        "send_allowed": False,
+        "failures": [] if ok else ["missing 200元，不寄实物"],
+        "final_ok": ok,
+        "ok": ok,
+    }
+
+
 def test_assertions_catch_a_wrong_price():
     failures = evaluate_turn(
         {
