@@ -90,16 +90,18 @@ def reeval_cli(args) -> int:
 
 
 def run_suite_cli(args) -> int:
-    from kefu_offline.fixtures.sim_logic_suite import build_suite, exposed_suite, style_suite, suite_counts, write_catalog
+    from kefu_offline.fixtures.sim_logic_suite import build_suite, deep_suite, exposed_suite, style_suite, suite_counts, write_catalog
 
     if args.subset == "exposed":
         sessions = exposed_suite()
     elif args.subset == "style":
         sessions = style_suite()
+    elif args.subset == "deep":
+        sessions = deep_suite()
     else:
         sessions = build_suite()
     counts = suite_counts(sessions)
-    full = args.subset not in {"exposed", "style"}
+    full = args.subset not in {"exposed", "style", "deep"}
     if full and (counts["turns"] < 200 or counts["sessions"] < 30 or counts["expect_model"] < 120 or counts["categories"] < 10):
         json.dump({"ok": False, "counts": counts}, sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")
@@ -136,7 +138,7 @@ def run_suite_cli(args) -> int:
         resume=args.resume,
     )
     public = {key: value for key, value in summary.items() if key != "results"}
-    if args.subset == "style":
+    if args.subset in {"style", "deep"}:
         public["turns"] = [
             {
                 "turn_id": row.get("turn_id"),
@@ -144,11 +146,15 @@ def run_suite_cli(args) -> int:
                 "model_candidate": row.get("model_candidate"),
                 "reject_reasons": row.get("reject_reasons") or [],
                 "final_draft": row.get("final_draft"),
+                "model_adopted": row.get("model_adopted"),
+                "model_rejected": row.get("model_rejected"),
                 "ok": row.get("ok"),
                 "failures": row.get("failures") or [],
+                "human_review": row.get("human_review"),
             }
             for row in summary["results"]
         ]
+        public["human_review_turns"] = [row.get("turn_id") for row in summary["results"] if row.get("human_review")]
     public["transport"] = transport
     public["checkpoint"] = str(checkpoint)
     public["simulated"] = True

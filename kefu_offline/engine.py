@@ -16,13 +16,15 @@ FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 
 REFUND_WORDS = ("退款", "退货", "包退", "无理由", "能退")
 TIMELINE_WORDS = ("多久", "几天", "工期", "什么时候", "马上", "今天", "明天", "小时")
+WORK_TIME_WORDS = ("工期", "做完", "做好", "完工")
+ARRIVAL_WORDS = ("到手", "到货", "送达", "收到", "物流")
 DISCOUNT_WORDS = ("便宜", "优惠", "最低", "底价", "少点", "能少", "刀")
 SCOPE_WORDS = ("范围", "包含", "做哪些", "能不能做", "包不包括", "做什么")
 SPEC_WORDS = ("型号", "成色", "几成", "牌子", "品牌")
 PRICE_WORDS = ("多少钱", "价格", "怎么卖", "收费", "包邮", "那个价", "刚才的价", "还是一样", "什么价", "怎么卖", "开价", "报价")
 SHIP_WORDS = ("邮费", "运费", "邮寄", "自提", "寄到")
 STOCK_WORDS = ("还在吗", "有货", "卖出", "还有吗")
-QTY_RE = re.compile(r"(\d+|[两三四五])\s*(件|套|本)")
+QTY_RE = re.compile(r"(\d+|[两三四五])\s*(件|套|本|台)")
 CN_QTY = {"两": 2, "三": 3, "四": 4, "五": 5}
 
 PROMISE_PATTERNS = (
@@ -355,7 +357,8 @@ def _price_sentence(item: CatalogItem, text: str, *, refuse: bool) -> str:
         return _sentence(stated)
     total = _bundle_total(text, item)
     if total is not None:
-        return _sentence(f"一共{_money(item, total)}")
+        extra = f"，{item.addons_text}" if item.addons_text else ""
+        return _sentence(f"一共{_money(item, total)}{extra}")
     return _sentence(stated)
 
 
@@ -375,6 +378,38 @@ def _bundle_total(text: str, item: CatalogItem) -> Optional[float]:
 def _has_grade(item: CatalogItem) -> bool:
     text = item.condition_text or ""
     return any(token in text for token in ("新", "成色", "品相"))
+
+
+def _fold_buyer(text: str) -> str:
+    """只折叠明显错字，方便识别问题。回复仍用资料，不回写买家原文。"""
+    folded = text.replace("多少錢", "多少钱").replace("咋样", "怎么样").replace("咋樣", "怎么样")
+    return re.sub(r"(?<!少)多钱", "多少钱", folded)
+
+
+def _negated_work(text: str) -> bool:
+    return re.search(r"不是.{0,16}(工期|做完|做好|完工)", text) is not None
+
+
+def _asks_arrival(text: str) -> bool:
+    return any(word in text for word in ARRIVAL_WORDS)
+
+
+def _asks_work(text: str) -> bool:
+    """工期是制作或服务耗时。问收到、到手时不能拿它去顶物流。"""
+    if _negated_work(text):
+        return False
+    if any(word in text for word in WORK_TIME_WORDS):
+        return True
+    if _asks_arrival(text):
+        return False
+    return any(word in text for word in ("多久", "几天", "什么时候", "马上", "今天", "明天", "小时"))
+
+
+def _timeline_sentence(item: CatalogItem) -> str:
+    text = (item.timeline_text or "").strip()
+    if text.startswith("工期"):
+        return _sentence(text)
+    return _sentence(f"工期{text}")
 
 
 def _asks_identity(text: str) -> bool:
@@ -436,18 +471,24 @@ def _ship_fact(item: CatalogItem, text: str, *, price_already: bool) -> tuple[Op
 
 
 def _known_situation(item: CatalogItem) -> list[str]:
-    """情况综述只用已经写明的事实，不补未知字段。"""
+    """综述保留影响实付、范围和承诺的已知事实。不报在售，也不把空字段填上。"""
     bits: list[str] = []
     if _has_grade(item) and item.condition_text:
         bits.append(_sentence(item.condition_text))
     if item.specs_text:
         bits.append(_sentence(item.specs_text))
+    if item.accessories_text:
+        bits.append(_sentence(item.accessories_text))
     if item.function_text:
         bits.append(_sentence(item.function_text))
     if item.scope_text:
         bits.append(_sentence(item.scope_text))
-    if item.stock_text and item.stock_text != "已售出":
-        bits.append(_sentence(item.stock_text))
+    if item.addons_text:
+        bits.append(_sentence(item.addons_text))
+    if item.prerequisites_text:
+        bits.append(_sentence(item.prerequisites_text))
+    if item.timeline_text:
+        bits.append(_timeline_sentence(item))
     if item.pickup_text:
         bits.append(_sentence(item.pickup_text))
     return bits
@@ -462,6 +503,7 @@ def _gap_sentence(gaps: list[str]) -> str:
         "model_unconfirmed": "型号",
         "price_unconfirmed": "价格",
         "shipping_unconfirmed": "运费",
+        "arrival_unconfirmed": "收到时间",
     }
     names = [labels[gap] for gap in gaps if gap in labels]
     if not names:
@@ -483,6 +525,7 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
         return "pending_review", "stock_sold", "已经卖出了。", []
     if not text.strip():
         return "handoff", "empty", "你想问什么？", ["empty"]
+    text = _fold_buyer(text)
     if foreign_item_ids(text, item, catalog):
         return "handoff", "cross_item", f"{item.title}这件不跟别的一起答。", ["cross_item"]
 
@@ -503,12 +546,15 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
             parts.append(_sentence(item.refund_policy))
         else:
             gaps.append("refund_unconfirmed")
-    if flags["timeline"]:
+    if _asks_work(text):
         asked = True
         if item.timeline_text:
-            parts.append(_sentence(item.timeline_text if str(item.timeline_text).startswith("工期") else f"工期{item.timeline_text}"))
+            parts.append(_timeline_sentence(item))
         else:
             gaps.append("timeline_unconfirmed")
+    if _asks_arrival(text):
+        asked = True
+        gaps.append("arrival_unconfirmed")
     if flags["scope"]:
         asked = True
         if item.scope_text:
@@ -631,6 +677,7 @@ def _audit(reason: str, generator: str) -> str:
         "refund_unconfirmed": "没有退款授权。",
         "scope_unconfirmed": "服务或商品范围没有记录。",
         "shipping_unconfirmed": "这个地方的运费没有记录。",
+        "arrival_unconfirmed": "没有物流时效，不能把工期当成到货。",
         "fact_unconfirmed": "型号和成色没有记录。",
         "empty": "没有可回复的正文。",
     }

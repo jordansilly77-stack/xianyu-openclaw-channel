@@ -87,7 +87,13 @@ python -m kefu_offline --reeval data/suite_results.jsonl --reeval-out data/suite
 
 `--reeval-out` 不能写成原 checkpoint。这条命令不需要模型环境变量。
 
-口吻子集不进 204 套件。先跑这个，再跑全套。输出里每轮有 `model_candidate`、`reject_reasons` 和 `final_draft`。
+口吻子集和深测都不进 204 套件。先跑口吻，再跑深测，最后才回归全套。204 轮自动通过不等于语义全部正确。输出里每轮有原候选、拒绝原因、最终稿和是否要人工看语气。
+
+```bash
+python -m kefu_offline --suite --subset deep --max-model-calls 60 --timeout-budget 240 --checkpoint data/suite_deep.jsonl
+```
+
+深测预算是 60 次真实模型和 240 秒。假模型或脚本坏候选只证明护栏，不能和真网关结果混成一次通过。
 
 ```bash
 python -m kefu_offline --suite --subset style --max-model-calls 20 --checkpoint data/suite_style.jsonl

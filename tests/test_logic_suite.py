@@ -198,8 +198,12 @@ def test_price_questions_do_not_require_unrelated_delivery_text():
     assert "包邮" in ship["absent"]
     assert evaluate_turn(_draft("不寄实物。"), ship) == []
     summary = next(turn for turn in _session_turns("sim-deploy-next") if "情况和价格" in turn["text"])["expect"]
-    assert summary["contain"] == ["200元", "不寄实物"]
-    assert evaluate_turn(_draft("200元，不寄实物。"), summary) == []
+    assert "200元" in summary["contain"]
+    assert "不寄实物" in summary["contain"]
+    assert "只部署Docker" in summary["contain"]
+    assert "自备服务器" in summary["contain"]
+    assert evaluate_turn(_draft("200元，不寄实物，只部署Docker，自备服务器。"), summary) == []
+    assert evaluate_turn(_draft("200元，不寄实物。"), summary)
     assert evaluate_turn(_draft("200元。"), summary)
     code_price = next(turn for turn in _session_turns("sim-code-main") if turn["text"] == "激活码现在卖多少")["expect"]
     assert code_price["contain"] == ["30元"]

@@ -339,8 +339,9 @@ def _apply_model(
         DISCOUNT_WORDS,
         PRICE_WORDS,
         REFUND_WORDS,
-        TIMELINE_WORDS,
+        _asks_arrival,
         _asks_identity,
+        _asks_work,
         _bundle_total,
         _format_yuan,
         _has_grade,
@@ -377,8 +378,29 @@ def _apply_model(
         problems.append("omitted_condition")
     if any(word in buyer_text for word in REFUND_WORDS) and not item.refund_policy and "退款" not in candidate and "退货" not in candidate:
         problems.append("omitted_refund")
-    if any(word in buyer_text for word in TIMELINE_WORDS) and item.timeline_text and item.timeline_text not in candidate:
+    if _asks_work(buyer_text) and item.timeline_text and item.timeline_text not in candidate:
         problems.append("omitted_timeline")
+    if "工期" in rule_draft and "工期" not in candidate:
+        problems.append("dropped_timeline_kind")
+    if _asks_arrival(buyer_text) and not _asks_work(buyer_text) and item.timeline_text and item.timeline_text in candidate:
+        problems.append("timeline_as_arrival")
+    for word in ("到手", "到货", "送达"):
+        if word in candidate and word not in corpus and word not in (item.timeline_text or ""):
+            problems.append("invented_arrival")
+            break
+    if "收到" in candidate and "收到" not in corpus and "收到时间" not in candidate:
+        problems.append("invented_arrival")
+    if "情况" in buyer_text and item.addons_text and item.addons_text not in candidate:
+        problems.append("omitted_addon")
+    if "情况" in buyer_text and item.scope_text and item.scope_text not in candidate:
+        problems.append("omitted_scope")
+    asks_stock = any(word in buyer_text for word in ("还在吗", "有货", "卖出", "还有吗"))
+    prior_stock = any(
+        turn.get("role") == "seller" and any(phrase in (turn.get("text") or "") for phrase in ("在售", "在的", "还有"))
+        for turn in (history or [])
+    )
+    if prior_stock and not asks_stock and "在售" in candidate and "在售" not in rule_draft:
+        problems.append("repeated_stock")
     if item.listed_price_yuan is not None:
         price_token = _money(item, item.listed_price_yuan)
         asks_price = any(word in buyer_text for word in PRICE_WORDS + DISCOUNT_WORDS + ("最低", "底价")) or _offer_amount(buyer_text, item) is not None
