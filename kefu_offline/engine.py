@@ -292,54 +292,99 @@ def trusted_corpus(item: Optional[CatalogItem]) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def _draft(reason: str, item: Optional[CatalogItem]) -> str:
-    if reason == "ack" and item:
-        parts = [f"收到。当前商品是「{item.title}」。"]
-        if item.listed_price_yuan is not None:
-            parts.append(f"标价{_format_yuan(item.listed_price_yuan)}元。")
-        if item.shipping:
-            parts.append(f"{item.shipping}。")
-        if item.description:
-            parts.append(item.description if item.description.endswith("。") else f"{item.description}。")
-        return "".join(parts)
-    if reason == "scope_quote" and item and item.scope_text:
-        return item.scope_text if item.scope_text.endswith("。") else f"范围：{item.scope_text}。"
-    if reason == "timeline_quote" and item and item.timeline_text:
-        return item.timeline_text if str(item.timeline_text).endswith("。") else f"工期：{item.timeline_text}。"
-    if reason == "spec_quote" and item:
+def _sentence(text: str) -> str:
+    text = text.strip()
+    return text if text.endswith("。") else f"{text}。"
+
+
+def _price_sentence(item: CatalogItem, *, refuse: bool) -> str:
+    price = _format_yuan(item.listed_price_yuan or 0)
+    shipping = f"，{item.shipping}" if item.shipping else ""
+    stated = f"标价{price}元{shipping}。"
+    if refuse:
+        return f"不能按你说的价。{stated}"
+    return stated
+
+
+def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[str, str, str, list[str]]:
+    """返回 status、reason、买家草稿、内部缺口。买家草稿不写「转人工」。"""
+    if item is None:
+        return "handoff", "unknown_item", "这件我还对不上。", ["unknown_item"]
+    if not text.strip():
+        return "handoff", "empty", "没看到要问的内容。", ["empty"]
+    if foreign_item_ids(text, item, catalog):
+        return "handoff", "cross_item", f"这是{item.title}，不能改答别的商品。", ["cross_item"]
+
+    flags = _flags(text)
+    parts: list[str] = []
+    gaps: list[str] = []
+    asked = False
+    refused_offer = flags["discount"] or _conflicting_price_number(text, item)
+
+    if flags["refund"]:
+        asked = True
+        if item.refund_policy:
+            parts.append(_sentence(item.refund_policy))
+        else:
+            gaps.append("refund_unconfirmed")
+            parts.append("退款规则还没定。")
+    if flags["timeline"]:
+        asked = True
+        if item.timeline_text:
+            parts.append(_sentence(item.timeline_text if str(item.timeline_text).startswith("工期") else f"工期{item.timeline_text}"))
+        else:
+            gaps.append("timeline_unconfirmed")
+            parts.append("工期还没定。")
+    if flags["scope"]:
+        asked = True
+        if item.scope_text:
+            parts.append(_sentence(f"范围是{item.scope_text}"))
+        else:
+            gaps.append("scope_unconfirmed")
+            parts.append("范围还没定。")
+    if flags["spec"]:
+        asked = True
         bits = []
         if item.model_text:
-            bits.append(f"型号：{item.model_text}")
+            bits.append(f"型号是{item.model_text}")
         if item.condition_text:
-            bits.append(f"成色：{item.condition_text}")
-        return "。".join(bits) + ("。" if bits else "型号或成色不能确认，转人工。")
-    if reason == "refund_quote" and item and item.refund_policy:
-        return item.refund_policy if item.refund_policy.endswith("。") else f"{item.refund_policy}。"
-    if reason == "floor_quote" and item and item.floor_price_yuan is not None:
-        return f"底价{_format_yuan(item.floor_price_yuan)}元。"
-    if reason == "listed_price" and item and item.listed_price_yuan is not None:
-        price = _format_yuan(item.listed_price_yuan)
-        title = f"「{item.title}」" if item.title else ""
-        if item.shipping:
-            return f"{title}标价{price}元，{item.shipping}。"
-        return f"{title}标价{price}元。"
-    if reason == "unknown_item":
-        return "没有对上商品，转人工。"
-    if reason == "cross_item" and item:
-        return f"当前是「{item.title}」，不能改答别的商品，转人工。"
-    if reason == "price_unconfirmed":
-        return "价格不能确认，转人工。"
-    if reason == "timeline_unconfirmed":
-        return "工期不能确认，转人工。"
-    if reason == "refund_unconfirmed":
-        return "退款不能代答，转人工。"
-    if reason == "scope_unconfirmed":
-        return "范围不能确认，转人工。"
-    if reason == "fact_unconfirmed":
-        return "型号或成色不能确认，转人工。"
-    if reason == "empty":
-        return "空消息，转人工。"
-    return "不能确认，转人工。"
+            bits.append(f"成色是{item.condition_text}")
+        if bits:
+            parts.append(_sentence("，".join(bits)))
+        else:
+            gaps.append("fact_unconfirmed")
+            parts.append("型号成色还没定。")
+    if refused_offer or flags["price"]:
+        asked = True
+        if item.listed_price_yuan is not None:
+            parts.append(_price_sentence(item, refuse=refused_offer))
+        elif item.floor_price_yuan is not None and flags["discount"]:
+            parts.append(f"底价{_format_yuan(item.floor_price_yuan)}元。")
+        else:
+            gaps.append("price_unconfirmed")
+            parts.append("价格还没定。")
+
+    if not asked:
+        line = f"在。{item.title}。"
+        if item.listed_price_yuan is not None:
+            line += _price_sentence(item, refuse=False)
+        return "pending_review", "ack", line, []
+
+    if gaps:
+        return "handoff", gaps[0], "".join(parts), gaps
+    if flags["price"] or refused_offer:
+        reason = "floor_quote" if item.floor_price_yuan is not None and item.listed_price_yuan is None else "listed_price"
+    elif flags["scope"]:
+        reason = "scope_quote"
+    elif flags["timeline"]:
+        reason = "timeline_quote"
+    elif flags["spec"]:
+        reason = "spec_quote"
+    elif flags["refund"]:
+        reason = "refund_quote"
+    else:
+        reason = "ack"
+    return "pending_review", reason, "".join(parts), []
 
 
 def _audit(reason: str, generator: str) -> str:
@@ -373,7 +418,7 @@ def draft_safety_problems(draft: str, decision: Decision, catalog: Catalog) -> l
     item = catalog.by_id(decision.matched_item_id)
     allowed_prices: list[float] = []
     allow_shipping = False
-    if item and decision.reason in _DIRECT_REASONS and item.listed_price_yuan is not None:
+    if item and item.listed_price_yuan is not None:
         allowed_prices.append(item.listed_price_yuan)
         allow_shipping = item.shipping == "包邮"
     if item and decision.reason == "floor_quote" and item.floor_price_yuan is not None:
@@ -449,27 +494,6 @@ def _decide_reason(text: str, item: Optional[CatalogItem], catalog: Catalog) -> 
     return "ack"
 
 
-def _with_other_known(reason: str, item: Optional[CatalogItem], text: str, draft: str) -> str:
-    if reason not in _DIRECT_REASONS or item is None:
-        return draft
-    flags = _flags(text)
-    extras: list[str] = []
-    if (
-        flags["price"]
-        and reason != "listed_price"
-        and item.listed_price_yuan is not None
-        and not _conflicting_price_number(text, item)
-        and "标价" not in draft
-    ):
-        price = _format_yuan(item.listed_price_yuan)
-        extras.append(f"标价{price}元" + (f"，{item.shipping}" if item.shipping else "") + "。")
-    if flags["scope"] and reason != "scope_quote" and item.scope_text and "范围：" not in draft:
-        extras.append(f"范围：{item.scope_text}")
-    if flags["timeline"] and reason != "timeline_quote" and item.timeline_text and "工期：" not in draft:
-        extras.append(f"工期：{item.timeline_text}")
-    return draft + "".join(extras)
-
-
 class Engine:
     def __init__(self, catalog: Catalog, generator: str = "rules"):
         if generator not in {"rules", "mock"}:
@@ -482,16 +506,17 @@ class Engine:
 
     def handle(self, incoming: Incoming) -> Decision:
         item = self._resolve(incoming)
-        reason = _decide_reason(incoming.text, item, self.catalog)
-        status = "pending_review" if reason in _DIRECT_REASONS else "handoff"
-        draft = _with_other_known(reason, item, incoming.text, _draft(reason, item))
+        status, reason, draft, gaps = _compose(incoming.text, item, self.catalog)
+        note = _audit(reason, self.generator)
+        if gaps:
+            note = "待人工审阅。" + note + "缺口：" + "、".join(gaps) + "。"
         decision = Decision(
             case_id=incoming.case_id,
             status=status,
             reason=reason,
             matched_item_id=item.item_id if item else None,
             buyer_visible_draft=draft,
-            audit_note=_audit(reason, self.generator),
+            audit_note=note,
             send_allowed=False,
             example=bool(item and item.example),
             generator=self.generator,
@@ -505,8 +530,8 @@ class Engine:
                 status="handoff",
                 reason="draft_rejected",
                 matched_item_id=decision.matched_item_id,
-                buyer_visible_draft="不能确认，转人工。",
-                audit_note="规则草稿未通过安全检查，已改成转人工。未发送。",
+                buyer_visible_draft="这句先不发，得再确认。",
+                audit_note="待人工审阅。规则草稿未通过检查。未发送。",
                 send_allowed=False,
                 example=True,
                 generator=self.generator,

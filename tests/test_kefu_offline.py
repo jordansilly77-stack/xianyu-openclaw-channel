@@ -162,10 +162,11 @@ def test_listed_router_price_and_refuses_other_amount():
     )
 
     assert quoted.reason == "listed_price"
-    assert quoted.buyer_visible_draft == "「二手路由器」标价310元，包邮。"
-    assert refused.reason == "price_unconfirmed"
+    assert quoted.buyer_visible_draft == "标价310元，包邮。"
+    assert refused.reason == "listed_price"
+    assert refused.buyer_visible_draft == "不能按你说的价。标价310元，包邮。"
     assert "20" not in refused.buyer_visible_draft
-    assert "310" not in refused.buyer_visible_draft
+    assert "最低" not in refused.buyer_visible_draft
 
 
 def test_package_does_not_import_network_clients():

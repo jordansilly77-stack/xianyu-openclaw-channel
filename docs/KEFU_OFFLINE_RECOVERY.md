@@ -12,8 +12,12 @@ export OPENAI_BASE_URL="http://127.0.0.1:3425/v1"
 export OPENAI_MODEL="group/free-first"
 export OPENAI_API_KEY="从本机正式配置读取"
 export OPENAI_TIMEOUT="30"
-python -m kefu_offline --mac-preview
+python -m kefu_offline --mac-preview \
+  --catalog kefu_offline/fixtures/mac_preview_catalog.yml \
+  --replay kefu_offline/fixtures/mac_preview_batch.json
 ```
+
+四条都是 15 元模拟商品或未知商品，不使用 20 元或 310 元。已能根据资料回答的才会调模型；工期和退款都没填、或者商品对不上时，只留下待审草稿，不再请求模型。买家可见的句子不写「转人工」，内部状态仍是 handoff。密钥不会写入预览文件。
 
 成功时进程退出码是 0，输出里 `model_invoked` 为 true，`send_allowed` 和 `transport_send` 为 false，`xianyu_transport` 为 `isolated`。草稿同时出现在终端和 `data/kefu_mac_preview.jsonl`。模型超时、连接失败或坏响应时退出码是 1，并保留规则草稿。缺少上述环境变量时退出码是 2，不会发请求。
 

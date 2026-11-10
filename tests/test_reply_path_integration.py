@@ -131,4 +131,4 @@ def test_database_price_answers_without_catalog_entry(monkeypatch):
     _socket, reviews = asyncio.run(_run(_chat("多少钱", item_id="db-item-001")))
     assert reviews[-1]["matched_item_id"] == "db-item-001"
     assert "28元" in reviews[-1]["buyer_visible_draft"]
-    assert "库里的测试商品" in reviews[-1]["buyer_visible_draft"]
+    assert "转人工" not in reviews[-1]["buyer_visible_draft"]

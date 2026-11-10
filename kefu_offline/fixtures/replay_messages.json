@@ -62,11 +62,12 @@
     "text": "能便宜到20吗，最低多少",
     "item_id": "ex-router",
     "expect": {
-      "status": "handoff",
-      "reason": "price_unconfirmed",
+      "status": "pending_review",
+      "reason": "listed_price",
       "matched_item_id": "ex-router",
       "send_allowed": false,
-      "must_not_contain": ["20", "310", "元", "包邮"]
+      "must_contain": ["310元", "包邮", "不能按你说的价"],
+      "must_not_contain": ["20", "最低", "优惠", "不议价"]
     }
   },
   {

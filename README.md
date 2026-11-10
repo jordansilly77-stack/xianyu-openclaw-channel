@@ -56,8 +56,12 @@ export OPENAI_BASE_URL="http://127.0.0.1:3425/v1"
 export OPENAI_MODEL="group/free-first"
 export OPENAI_API_KEY="从本机正式配置读取"
 export OPENAI_TIMEOUT="30"
-python -m kefu_offline --mac-preview
+python -m kefu_offline --mac-preview \
+  --catalog kefu_offline/fixtures/mac_preview_catalog.yml \
+  --replay kefu_offline/fixtures/mac_preview_batch.json
 ```
+
+不带 `--replay` 时仍是原来的单条预览。批量里的每一条都走 `production_preview_turn`。规则已经判定待人工的例子不会再调模型。输出里有草稿、是否调用模型、候选是否采用、规则原因、耗时和发送关闭状态。
 
 这条命令使用模拟商品和模拟买家消息，走生产用的商品识别、规则和模型调用，不打开闲鱼连接。说明见 `docs/KEFU_OFFLINE_RECOVERY.md`。
 
