@@ -77,7 +77,13 @@ export OPENAI_TIMEOUT="30"
 python -m kefu_offline --suite --max-model-calls 180 --timeout-budget 600 --checkpoint data/suite_results.jsonl
 ```
 
-终端会打印会话数、轮次数、`model_invoked`、`rule_skipped`、`failed`。失败时退出码不是 0，逐轮结果留在 checkpoint 里。`--resume` 只跳过已经成功的轮次，不会自动重试失败轮。`human_review` 大于 0 的轮次只做了硬性断言，语气还要人看。
+终端会打印 `sessions`、`turns`、`model_invoked`、`rule_skipped`、`failed`、`guard_blocked`、`model_output_rejected`、`human_review`。`guard_blocked` 是坏候选被挡住，不是模型答对。checkpoint 里的 `model_candidate` 和 `reject_reasons` 只在模拟套件里保留。失败时退出码不是 0。`--resume` 只跳过已经成功的轮次。
+
+先跑上次 Mac 暴露的几段：
+
+```bash
+python -m kefu_offline --suite --subset exposed --max-model-calls 30 --checkpoint data/suite_exposed.jsonl
+```
 
 这条命令使用模拟商品和模拟买家消息，走生产用的商品识别、规则和模型调用，不打开闲鱼连接。说明见 `docs/KEFU_OFFLINE_RECOVERY.md`。
 

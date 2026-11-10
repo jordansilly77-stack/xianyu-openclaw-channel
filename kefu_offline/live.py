@@ -111,6 +111,7 @@ def _seller_item(raw: dict, seen: set[str]) -> Optional[CatalogItem]:
         shipping_detail=_text(raw.get("shipping_detail")),
         prerequisites_text=_text(raw.get("prerequisites_text")),
         addons_text=_text(raw.get("addons_text")),
+        function_text=_text(raw.get("function_text")),
     )
 
 
@@ -217,6 +218,10 @@ def handle_live_message(
         record["model_adopted"] = False
     record["send_allowed"] = False
     record["transport_send"] = False
+    suite_only = {
+        "model_candidate": record.pop("model_candidate", None),
+        "reject_reasons": record.pop("reject_reasons", []),
+    }
     _HISTORY.setdefault(key, [])
     _HISTORY[key].extend(
         [
@@ -228,6 +233,8 @@ def handle_live_message(
     if message_id:
         _SEEN[(cookie_id, chat_id, message_id)] = dict(record)
     ReviewStore().append(record)
+    if os.environ.get("KEFU_SUITE_TRACE") == "1":
+        record.update(suite_only)
     return record
 
 
@@ -284,6 +291,7 @@ def build_model_messages(
         "shipping_detail": item.shipping_detail,
         "prerequisites_text": item.prerequisites_text,
         "addons_text": item.addons_text,
+        "function_text": item.function_text,
     }
     facts = {key: value for key, value in facts.items() if value not in (None, "")}
     return [
@@ -327,16 +335,42 @@ def _apply_model(
         return
     record["model_invoked"] = True
     record["generator"] = "openai"
+    from kefu_offline.engine import _bundle_total, _format_yuan, _has_grade
+
+    allowed = [item.listed_price_yuan] if item.listed_price_yuan is not None else []
+    total = _bundle_total(buyer_text, item)
+    if total is not None:
+        allowed.append(total)
     problems = text_safety_problems(
         candidate,
         allowed_price=item.listed_price_yuan,
-        allowed_prices=[item.listed_price_yuan] if item.listed_price_yuan is not None else [],
-        allow_shipping=item.shipping == "包邮",
+        allowed_prices=allowed,
+        allow_shipping=bool(item.shipping and "包邮" in item.shipping),
         trusted_text=trusted_corpus(item),
     )
     rule_draft = record.get("buyer_visible_draft") or ""
     if "不行" in rule_draft and "不行" not in candidate:
         problems.append("dropped_refusal")
+    if item.listed_price_yuan is not None and f"{_format_yuan(item.listed_price_yuan)}元不行" in candidate:
+        problems.append("refused_own_price")
+    corpus = trusted_corpus(item)
+    for phrase in ("成色一般", "成色不错", "成色很好", "看起来不错", "应该没问题", "功能正常"):
+        if phrase in candidate and phrase not in corpus:
+            problems.append(f"unsupported:{phrase}")
+    if "成色" in buyer_text and not _has_grade(item) and item.function_text and item.function_text in candidate:
+        problems.append("wrong_facet")
+    if item.stock_text == "已售出" and any(phrase in candidate for phrase in ("在的", "在售", "还有", "有的")):
+        problems.append("sold_said_available")
+    if item.stock_text == "在售" and any(phrase in candidate for phrase in ("卖出了", "已售出", "没了")):
+        problems.append("available_said_sold")
+    traced = os.environ.get("KEFU_SUITE_TRACE") == "1"
+    if traced:
+        record["model_candidate"] = candidate
+        record["reject_reasons"] = list(problems)
+        if violates_style(candidate):
+            record["reject_reasons"].append("style")
+        if _copies_untrusted_instruction(candidate, buyer_text):
+            record["reject_reasons"].append("copied_buyer_instruction")
     if problems or _copies_untrusted_instruction(candidate, buyer_text) or violates_style(candidate):
         record["model_rejected"] = True
         record["model_adopted"] = False

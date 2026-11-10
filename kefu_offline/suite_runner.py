@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -36,9 +37,24 @@ class BudgetModel:
         return self.inner.complete(messages)
 
 
+_IN_STOCK = ("在售", "在的", "还有", "有的")
+_SOLD = ("卖出", "没了", "售出")
+
+
 def evaluate_turn(record: dict[str, Any], expect: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     draft = str(record.get("buyer_visible_draft") or "")
+    availability = expect.get("availability")
+    if availability == "in_stock":
+        if not any(phrase in draft for phrase in _IN_STOCK):
+            failures.append("not available")
+        if any(phrase in draft for phrase in _SOLD):
+            failures.append("said sold")
+    elif availability == "sold":
+        if not any(phrase in draft for phrase in _SOLD):
+            failures.append("not sold")
+        if any(phrase in draft for phrase in _IN_STOCK):
+            failures.append("sold but said available")
     if expect.get("status") and record.get("status") != expect["status"]:
         failures.append(f"status {record.get('status')} != {expect['status']}")
     if expect.get("reason") and record.get("reason") != expect["reason"]:
@@ -72,6 +88,7 @@ def run_suite(
     checkpoint: Optional[Path] = None,
     resume: bool = False,
 ) -> dict[str, Any]:
+    os.environ["KEFU_SUITE_TRACE"] = "1"
     reset_runtime_state()
     done: dict[str, dict[str, Any]] = {}
     if resume and checkpoint and checkpoint.exists():
@@ -120,6 +137,9 @@ def run_suite(
             "matched_item_id": record.get("matched_item_id"),
             "text": turn.get("text"),
             "draft": record.get("buyer_visible_draft"),
+            "final_draft": record.get("buyer_visible_draft"),
+            "model_candidate": record.get("model_candidate"),
+            "reject_reasons": record.get("reject_reasons") or [],
             "status": record.get("status"),
             "reason": record.get("reason"),
             "model_invoked": bool(record.get("model_invoked")),
@@ -139,6 +159,11 @@ def run_suite(
         if over_time and turn["expect"].get("model") and not record.get("model_invoked"):
             failures.append("timeout_budget")
         row["failures"] = failures
+        row["final_ok"] = not failures
+        row["model_output_ok"] = (
+            None if not record.get("model_invoked") else not bool(record.get("model_rejected"))
+        )
+        row["guard_blocked"] = bool(record.get("model_rejected")) and row["final_ok"]
         row["ok"] = not failures
         results.append(row)
         if checkpoint:
@@ -216,6 +241,9 @@ def _summarize(sessions: list[dict[str, Any]], results: list[dict[str, Any]]) ->
         "rule_skipped": sum(1 for row in results if not row.get("model_invoked")),
         "duplicate": sum(1 for row in results if row.get("duplicate")),
         "failed": sum(1 for row in results if not row.get("ok")),
+        "final_failed": sum(1 for row in results if not row.get("final_ok")),
+        "guard_blocked": sum(1 for row in results if row.get("guard_blocked")),
+        "model_output_rejected": sum(1 for row in results if row.get("model_output_ok") is False),
         "human_review": sum(1 for row in results if row.get("human_review")),
         "send_allowed": False,
         "results": results,

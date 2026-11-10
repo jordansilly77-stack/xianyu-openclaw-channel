@@ -83,6 +83,7 @@ class CatalogItem:
     shipping_detail: Optional[str] = None
     prerequisites_text: Optional[str] = None
     addons_text: Optional[str] = None
+    function_text: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -301,6 +302,15 @@ def trusted_corpus(item: Optional[CatalogItem]) -> str:
         item.refund_policy,
         item.description,
         item.shipping,
+        item.stock_text,
+        item.pickup_text,
+        item.specs_text,
+        item.accessories_text,
+        item.bundle_text,
+        item.shipping_detail,
+        item.prerequisites_text,
+        item.addons_text,
+        item.function_text,
     ]
     return "\n".join(part for part in parts if part)
 
@@ -362,6 +372,11 @@ def _bundle_total(text: str, item: CatalogItem) -> Optional[float]:
     return item.listed_price_yuan * count
 
 
+def _has_grade(item: CatalogItem) -> bool:
+    text = item.condition_text or ""
+    return any(token in text for token in ("新", "成色", "品相"))
+
+
 def _asks_identity(text: str) -> bool:
     folded = text.lower().replace(" ", "")
     return any(phrase in folded for phrase in ("是不是ai", "你是ai", "是ai吗", "机器人", "真人"))
@@ -402,7 +417,9 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
     parts: list[str] = []
     gaps: list[str] = []
     asked = False
-    refused_offer = flags["discount"] or _conflicting_price_number(text, item)
+    offer = _offer_amount(text, item) if item.listed_price_yuan is not None else None
+    refused_offer = offer is not None
+    wants_price = flags["price"] or flags["discount"] or "最低" in text or "底价" in text
 
     if _asks_identity(text):
         asked = True
@@ -448,12 +465,15 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
             parts.append(_sentence(item.shipping))
         else:
             gaps.append("scope_unconfirmed")
-    if any(word in text for word in ("成色", "新旧", "几成")) and item.condition_text:
+    if any(word in text for word in ("成色", "新旧", "几成")):
         asked = True
-        parts.append(_sentence(item.condition_text))
-    elif any(word in text for word in ("成色", "新旧", "几成")):
+        if _has_grade(item):
+            parts.append(_sentence(item.condition_text or ""))
+        else:
+            parts.append("成色没确认。")
+    if any(word in text for word in ("制冷", "功能")) and item.function_text:
         asked = True
-        gaps.append("fact_unconfirmed")
+        parts.append(_sentence(item.function_text))
     if any(word in text for word in ("配件", "充电器", "前后盖")) and item.accessories_text:
         asked = True
         parts.append(_sentence(item.accessories_text))
@@ -475,18 +495,16 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
     if "密钥" in text or "API_KEY" in text.upper():
         asked = True
         parts.append("密钥不能发。")
-    if flags["spec"]:
+    if any(word in text for word in ("型号", "牌子", "品牌")):
         asked = True
-        bits = []
         if item.model_text:
-            bits.append(f"型号{item.model_text}")
-        if item.condition_text:
-            bits.append(f"成色{item.condition_text}")
-        if bits:
-            parts.append(_sentence("，".join(bits)))
+            parts.append(_sentence(f"型号{item.model_text}"))
         else:
             gaps.append("fact_unconfirmed")
-    if refused_offer or flags["price"]:
+    if item.listed_price_yuan is None and _conflicting_price_number(text, item):
+        asked = True
+        gaps.append("price_unconfirmed")
+    elif refused_offer or wants_price:
         asked = True
         if item.listed_price_yuan is not None:
             parts.append(_price_sentence(item, text, refuse=refused_offer))
@@ -503,7 +521,7 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
 
     if gaps:
         return "handoff", gaps[0], draft, gaps
-    if flags["price"] or refused_offer:
+    if wants_price or refused_offer:
         reason = "listed_price"
     elif flags["scope"]:
         reason = "scope_quote"
@@ -556,13 +574,16 @@ def _audit(reason: str, generator: str) -> str:
 _DIRECT_REASONS = {"ack", "listed_price", "scope_quote", "timeline_quote", "spec_quote", "refund_quote", "floor_quote"}
 
 
-def draft_safety_problems(draft: str, decision: Decision, catalog: Catalog) -> list[str]:
+def draft_safety_problems(draft: str, decision: Decision, catalog: Catalog, buyer_text: str = "") -> list[str]:
     item = catalog.by_id(decision.matched_item_id)
     allowed_prices: list[float] = []
     allow_shipping = False
     if item and item.listed_price_yuan is not None:
         allowed_prices.append(item.listed_price_yuan)
-        allow_shipping = item.shipping == "包邮"
+        allow_shipping = bool(item.shipping and "包邮" in item.shipping)
+        total = _bundle_total(buyer_text, item)
+        if total is not None:
+            allowed_prices.append(total)
     if item and decision.reason == "floor_quote" and item.floor_price_yuan is not None:
         allowed_prices.append(item.floor_price_yuan)
     return text_safety_problems(
@@ -605,8 +626,6 @@ def text_safety_problems(
             remainder = draft.replace(refusal, "", 1)
             if not re.search(rf"(?<!\d){re.escape(token)}元", remainder):
                 continue
-        if prices and "一共" in draft and any(abs(value - price * count) <= 0.001 for price in prices for count in range(2, 10)):
-            continue
         problems.append(f"unapproved_price:{raw}")
     return problems
 
@@ -678,7 +697,7 @@ class Engine:
             model_invoked=False,
             mock_draft_rejected=self.generator == "mock",
         )
-        problems = draft_safety_problems(draft, decision, self.catalog)
+        problems = draft_safety_problems(draft, decision, self.catalog, incoming.text)
         if problems:
             decision = Decision(
                 case_id=decision.case_id,

@@ -31,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout-budget", type=float, default=600)
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--subset", default="")
     parser.add_argument("--list-reviews", action="store_true")
     args = parser.parse_args(argv)
     if args.suite:
@@ -61,10 +62,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run_suite_cli(args) -> int:
-    from kefu_offline.fixtures.sim_logic_suite import build_suite, suite_counts, write_catalog
+    from kefu_offline.fixtures.sim_logic_suite import build_suite, exposed_suite, suite_counts, write_catalog
 
-    counts = suite_counts()
-    if counts["turns"] < 200 or counts["sessions"] < 30 or counts["expect_model"] < 120 or counts["categories"] < 10:
+    sessions = exposed_suite() if args.subset == "exposed" else build_suite()
+    counts = suite_counts(sessions)
+    full = args.subset != "exposed"
+    if full and (counts["turns"] < 200 or counts["sessions"] < 30 or counts["expect_model"] < 120 or counts["categories"] < 10):
         json.dump({"ok": False, "counts": counts}, sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")
         return 1
@@ -92,7 +95,7 @@ def run_suite_cli(args) -> int:
     elif checkpoint.exists() and not args.resume:
         checkpoint.unlink()
     summary = run_suite(
-        build_suite(),
+        sessions,
         model_client=client,
         max_model_calls=args.max_model_calls,
         timeout_budget_s=args.timeout_budget,

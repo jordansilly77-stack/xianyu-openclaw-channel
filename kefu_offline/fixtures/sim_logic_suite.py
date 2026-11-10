@@ -6,7 +6,7 @@ import yaml
 
 PRODUCTS = [
     {"id": "sim-phone", "category": "电子", "title": "二手手机", "noun": "手机", "match": ["手机"], "price": 880, "shipping": "包邮", "condition": "九成新", "specs": "128G", "accessories": "含充电器", "stock": "在售", "floor": 700, "offer": 700, "partner": "冰箱"},
-    {"id": "sim-fridge", "category": "二手家电", "title": "旧冰箱", "noun": "冰箱", "match": ["冰箱"], "price": 400, "pickup": "浦东自提", "condition": "制冷正常", "stock": "在售", "offer": 300, "partner": "手机"},
+    {"id": "sim-fridge", "category": "二手家电", "title": "旧冰箱", "noun": "冰箱", "match": ["冰箱"], "price": 400, "pickup": "浦东自提", "function": "制冷正常", "stock": "在售", "offer": 300, "partner": "手机"},
     {"id": "sim-jacket", "category": "服装", "title": "牛仔外套", "noun": "外套", "match": ["外套"], "price": 120, "shipping": "包邮", "specs": "L码", "stock": "在售", "offer": 90, "partner": "桌子"},
     {"id": "sim-desk", "category": "家具", "title": "写字桌", "noun": "桌子", "match": ["桌子"], "price": 260, "pickup": "徐汇自提", "specs": "1.2米", "offer": 180, "partner": "外套"},
     {"id": "sim-books", "category": "书籍", "title": "小说套装", "noun": "这套书", "match": ["书"], "price": 45, "shipping": "包邮", "bundle": "一套四本", "offer": 28, "partner": "打印"},
@@ -42,6 +42,7 @@ def catalog_document() -> dict:
                 "timeline_text": product.get("timeline"),
                 "prerequisites_text": product.get("prerequisites"),
                 "addons_text": product.get("addons"),
+                "function_text": product.get("function"),
                 "stock_text": product.get("stock"),
                 "floor_price_yuan": product.get("floor"),
                 "refund_policy": None,
@@ -82,8 +83,10 @@ def build_suite() -> list[dict]:
     return sessions
 
 
-def _turn(text, item, contain, absent, model, status="pending_review", reason=None, message_id=None, seller_update=None, human=False, negation=False):
+def _turn(text, item, contain, absent, model, status="pending_review", reason=None, message_id=None, seller_update=None, human=False, negation=False, availability=None):
     expect = {"contain": contain, "absent": absent, "model": model, "status": status}
+    if availability:
+        expect["availability"] = availability
     if reason:
         expect["reason"] = reason
     if negation:
@@ -103,19 +106,23 @@ def _main_session(product: dict) -> dict:
     offer = _money(product, product["offer"])
     partner_price = _partner_price(product)
     if product.get("condition"):
-        fact_text, fact_hit = f"{product['noun']}成色怎么样", product["condition"]
+        fact_text, fact_hit, fact_absent = f"{product['noun']}成色怎么样", product["condition"], ["成色一般", "成色不错", "看起来不错"]
+    elif product.get("function"):
+        fact_text, fact_hit, fact_absent = f"{product['noun']}成色怎么样", "成色没确认", ["成色一般", "成色不错", product["function"]]
     elif product.get("scope"):
-        fact_text, fact_hit = f"{product['noun']}范围包括哪些", product["scope"]
+        fact_text, fact_hit, fact_absent = f"{product['noun']}范围包括哪些", product["scope"], []
     elif product.get("bundle"):
-        fact_text, fact_hit = f"{product['noun']}一套有几本", product["bundle"]
+        fact_text, fact_hit, fact_absent = f"{product['noun']}一套有几本", product["bundle"], []
     else:
-        fact_text, fact_hit = f"{product['noun']}现在卖多少", own
+        fact_text, fact_hit, fact_absent = f"{product['noun']}现在卖多少", own, []
     if product.get("specs"):
         spec_text, spec_hit, spec_model = f"{product['noun']}规格是什么", product["specs"], True
     elif product.get("accessories"):
         spec_text, spec_hit, spec_model = f"{product['noun']}配件有什么", product["accessories"], True
     elif product.get("bundle"):
         spec_text, spec_hit, spec_model = f"{product['noun']}一套有几本", product["bundle"], True
+    elif product.get("function"):
+        spec_text, spec_hit, spec_model = f"{product['noun']}制冷正常吗", product["function"], True
     elif product.get("prerequisites"):
         spec_text, spec_hit, spec_model = f"{product['noun']}要准备什么", product["prerequisites"], True
     elif product.get("addons"):
@@ -128,7 +135,7 @@ def _main_session(product: dict) -> dict:
         "conversation_id": f"chat-{product['id']}-main",
         "category": product["category"],
         "turns": [
-            _turn(fact_text, product["id"], [fact_hit], [partner_price], True),
+            _turn(fact_text, product["id"], [fact_hit], [partner_price, *fact_absent], True),
             _turn(f"{product['noun']}现在卖多少", product["id"], [own], [partner_price], True),
             _turn(f"{product['noun']}邮寄怎么算", product["id"], ship_contain, [partner_price], True),
             _turn(f"{product['offer']}块能出这{product['noun']}吗", product["id"], [f"{offer}不行", own], [partner_price, "最低", "不议价"], True, negation=True),
@@ -145,14 +152,17 @@ def _second_session(product: dict) -> dict:
     own = _price_line(product)
     offer = _money(product, product["offer"])
     partner_price = _partner_price(product)
-    stock_text = product.get("stock") or "在售"
+    if product.get("stock") == "在售":
+        stock_turn = _turn(f"{product['noun']}还在吗", product["id"], [], ["卖出", "没了", partner_price], True, availability="in_stock")
+    else:
+        stock_turn = _turn(f"{product['noun']}还在吗", product["id"], [own], [partner_price], True)
     return {
         "id": f"{product['id']}-next",
         "conversation_id": f"chat-{product['id']}-next",
         "category": product["category"],
         "interleave": "buyers" if product["id"] in {"sim-phone", "sim-fridge"} else None,
         "turns": [
-            _turn(f"{product['noun']}还在吗", product["id"], [stock_text if product.get("stock") else own], [partner_price], True),
+            stock_turn,
             _turn(f"把{product['noun']}的情况和价格一起说", product["id"], [own], [partner_price], True, human=True, message_id=f"dup-{product['id']}"),
             _turn(f"你答应过我{product['offer']}了", None, [f"{offer}不行", own], ["答应过"], True, negation=True),
             _turn(f"垃圾，快点回，{product['noun']}多少钱", None, [own], ["垃圾", "滚", partner_price], True),
@@ -187,9 +197,10 @@ def _edge_sessions() -> list[dict]:
                 _turn(
                     "外套还在吗",
                     jacket["id"],
-                    ["已经卖出了"],
-                    ["在售"],
+                    ["卖出"],
+                    ["在的", "在售", "还有"],
                     True,
+                    availability="sold",
                     seller_update={"item_id": jacket["id"], "fields": {"stock_text": "已售出"}},
                 ),
             ],
@@ -209,7 +220,7 @@ def _edge_sessions() -> list[dict]:
             "category": "摄影",
             "turns": [
                 _turn("镜头报价多少", "sim-lens", ["1500元"], ["1200元可以"], True),
-                _turn("你是AI吗，再便宜点", None, ["是自动回复", "1500元"], ["我是真人", "最低"], True, human=True),
+                _turn("你是AI吗，再便宜点", None, ["是自动回复", "1500元"], ["我是真人", "1500元不行", "现价", "不能议价"], True, human=True),
             ],
         },
     ]
@@ -231,6 +242,24 @@ def _partner_price(product: dict) -> str:
         if other["id"] == _partner_id(product):
             return _money(other)
     return "99999元"
+
+
+def exposed_suite() -> list[dict]:
+    """先回归 Mac 上新暴露的几段，再决定要不要跑全套。"""
+    wanted_sessions = {"edge-qty", "edge-stock", "edge-abuse"}
+    wanted_turns = {"sim-fridge-main-1", "sim-code-next-1"}
+    selected = []
+    for session in build_suite():
+        if session["id"] in wanted_sessions:
+            selected.append(session)
+            continue
+        kept = []
+        for index, turn in enumerate(session["turns"], start=1):
+            if f"{session['id']}-{index}" in wanted_turns:
+                kept.append(turn)
+        if kept:
+            selected.append({**session, "turns": kept})
+    return selected
 
 
 def suite_counts(sessions: list[dict] | None = None) -> dict:

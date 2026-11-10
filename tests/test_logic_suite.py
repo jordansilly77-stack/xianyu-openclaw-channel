@@ -39,6 +39,81 @@ def test_suite_with_fake_model(tmp_path, monkeypatch):
     assert "api_key" not in saved
 
 
+def test_fake_candidates_for_stock_total_condition_and_bargain(tmp_path, monkeypatch):
+    catalog = tmp_path / "catalog.yml"
+    write_catalog(catalog)
+    monkeypatch.setenv("KEFU_CATALOG_PATH", str(catalog))
+    monkeypatch.setenv("KEFU_REVIEW_PATH", str(tmp_path / "reviews.jsonl"))
+    monkeypatch.setenv("KEFU_MODEL_MODE", "openai")
+    monkeypatch.setenv("KEFU_SUITE_TRACE", "1")
+    monkeypatch.delenv("XIANYU_ALLOW_SEND", raising=False)
+    from kefu_offline.live import handle_live_message, reset_runtime_state
+
+    class Scripted:
+        def __init__(self, reply: str):
+            self.reply = reply
+
+        def complete(self, messages):
+            return self.reply
+
+    reset_runtime_state()
+    instock = handle_live_message(
+        cookie_id="suite", chat_id="code", sender_id="b", sender_name="b",
+        text="激活码还在吗", item_id="sim-code", model_client=Scripted("在的。"),
+    )
+    assert instock["model_adopted"] is True
+    assert evaluate_turn(instock, {"model": True, "status": "pending_review", "availability": "in_stock", "absent": ["卖出"]}) == []
+
+    reset_runtime_state()
+    from kefu_offline.live import note_seller_fact
+    note_seller_fact("sim-jacket", stock_text="已售出")
+    sold = handle_live_message(
+        cookie_id="suite", chat_id="sold", sender_id="b", sender_name="b",
+        text="外套还在吗", item_id="sim-jacket", model_client=Scripted("在的。"),
+    )
+    assert sold["model_rejected"] is True
+    assert "sold_said_available" in (sold.get("reject_reasons") or [])
+    assert evaluate_turn(sold, {"model": True, "availability": "sold", "contain": ["卖出"], "absent": ["在的"]}) == []
+
+    reset_runtime_state()
+    good_total = handle_live_message(
+        cookie_id="suite", chat_id="books", sender_id="b", sender_name="b",
+        text="两套一共多少", item_id="sim-books", model_client=Scripted("两套90元。"),
+    )
+    assert good_total["model_adopted"] is True
+    assert "90元" in good_total["buyer_visible_draft"]
+
+    reset_runtime_state()
+    bad_total = handle_live_message(
+        cookie_id="suite", chat_id="books2", sender_id="b", sender_name="b",
+        text="两套一共多少", item_id="sim-books", model_client=Scripted("一共80元。"),
+    )
+    assert bad_total["model_rejected"] is True
+    assert bad_total["model_candidate"] == "一共80元。"
+    assert "90元" in bad_total["buyer_visible_draft"]
+    assert bad_total["model_adopted"] is False
+
+    reset_runtime_state()
+    fabricated = handle_live_message(
+        cookie_id="suite", chat_id="fridge", sender_id="b", sender_name="b",
+        text="冰箱成色怎么样", item_id="sim-fridge", model_client=Scripted("制冷正常，成色一般。"),
+    )
+    assert fabricated["model_rejected"] is True
+    assert "成色没确认" in fabricated["buyer_visible_draft"]
+    assert "成色一般" not in fabricated["buyer_visible_draft"]
+    assert "制冷正常" not in fabricated["buyer_visible_draft"]
+
+    reset_runtime_state()
+    bargain = handle_live_message(
+        cookie_id="suite", chat_id="lens", sender_id="b", sender_name="b",
+        text="你是AI吗，再便宜点", item_id="sim-lens", model_client=Scripted("是自动回复。1500元不行，现价包邮。"),
+    )
+    assert bargain["model_rejected"] is True
+    assert "1500元不行" not in bargain["buyer_visible_draft"]
+    assert "1500元" in bargain["buyer_visible_draft"]
+    assert "是自动回复" in bargain["buyer_visible_draft"]
+
+
 def test_assertions_catch_a_wrong_price():
     failures = evaluate_turn(
         {
