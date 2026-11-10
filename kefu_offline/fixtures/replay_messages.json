@@ -66,8 +66,8 @@
       "reason": "listed_price",
       "matched_item_id": "ex-router",
       "send_allowed": false,
-      "must_contain": ["310元", "包邮", "不能按你说的价"],
-      "must_not_contain": ["20", "最低", "优惠", "不议价"]
+      "must_contain": ["20元不行", "310元包邮"],
+      "must_not_contain": ["最低", "优惠", "不议价", "标价"]
     }
   },
   {

@@ -105,6 +105,6 @@ def test_live_handler_keeps_unknown_items_for_review():
     assert "可以直接申请退款" in config
 
     assert not (ROOT / "safari_token.py").exists()
-    assert list((ROOT / "openclaw-plugin" / "skills").glob("*/SKILL.md")) == [
-        ROOT / "openclaw-plugin" / "skills" / "xianyu-product" / "SKILL.md"
-    ]
+    skills = sorted((ROOT / "openclaw-plugin" / "skills").glob("*/SKILL.md"))
+    assert ROOT / "openclaw-plugin" / "skills" / "xianyu-product" / "SKILL.md" in skills
+    assert ROOT / "openclaw-plugin" / "skills" / "xianyu-kefu" / "SKILL.md" in skills

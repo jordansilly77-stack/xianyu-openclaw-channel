@@ -297,23 +297,60 @@ def _sentence(text: str) -> str:
     return text if text.endswith("。") else f"{text}。"
 
 
-def _price_sentence(item: CatalogItem, *, refuse: bool) -> str:
+def _offer_amount(text: str, item: CatalogItem) -> Optional[float]:
+    if item.listed_price_yuan is None:
+        return None
+    for raw in re.findall(r"(?<!\d)(\d+(?:\.\d+)?)(?!\d)", text):
+        number = float(raw)
+        if abs(number - item.listed_price_yuan) > 0.001:
+            return number
+    return None
+
+
+def _price_sentence(item: CatalogItem, text: str, *, refuse: bool) -> str:
     price = _format_yuan(item.listed_price_yuan or 0)
-    shipping = f"，{item.shipping}" if item.shipping else ""
-    stated = f"标价{price}元{shipping}。"
+    stated = f"{price}元{item.shipping}" if item.shipping else f"{price}元"
     if refuse:
-        return f"不能按你说的价。{stated}"
-    return stated
+        offer = _offer_amount(text, item)
+        if offer is not None:
+            return _sentence(f"{_format_yuan(offer)}元不行，{stated}")
+        return _sentence(stated)
+    return _sentence(stated)
+
+
+def _asks_identity(text: str) -> bool:
+    folded = text.lower().replace(" ", "")
+    return any(phrase in folded for phrase in ("是不是ai", "你是ai", "是ai吗", "机器人", "真人"))
+
+
+def _gap_sentence(gaps: list[str]) -> str:
+    labels = {
+        "refund_unconfirmed": "退款",
+        "timeline_unconfirmed": "工期",
+        "scope_unconfirmed": "范围",
+        "fact_unconfirmed": "型号成色",
+        "price_unconfirmed": "价格",
+    }
+    names = [labels[gap] for gap in gaps if gap in labels]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return f"{names[0]}还不确定。"
+    if len(names) == 2:
+        return f"{names[0]}和{names[1]}都还不确定。"
+    return f"{'、'.join(names[:-1])}和{names[-1]}都还不确定。"
 
 
 def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[str, str, str, list[str]]:
     """返回 status、reason、买家草稿、内部缺口。买家草稿不写「转人工」。"""
     if item is None:
-        return "handoff", "unknown_item", "这件我还对不上。", ["unknown_item"]
+        if any(word in text for word in PRICE_WORDS) or _conflicting_price_number_text(text):
+            return "handoff", "unknown_item", "没对上这件，价格我说不准。", ["unknown_item"]
+        return "handoff", "unknown_item", "没对上这件。", ["unknown_item"]
     if not text.strip():
-        return "handoff", "empty", "没看到要问的内容。", ["empty"]
+        return "handoff", "empty", "你想问什么？", ["empty"]
     if foreign_item_ids(text, item, catalog):
-        return "handoff", "cross_item", f"这是{item.title}，不能改答别的商品。", ["cross_item"]
+        return "handoff", "cross_item", f"{item.title}这件不跟别的一起答。", ["cross_item"]
 
     flags = _flags(text)
     parts: list[str] = []
@@ -321,54 +358,53 @@ def _compose(text: str, item: Optional[CatalogItem], catalog: Catalog) -> tuple[
     asked = False
     refused_offer = flags["discount"] or _conflicting_price_number(text, item)
 
+    if _asks_identity(text):
+        asked = True
+        parts.append("是自动回复。")
     if flags["refund"]:
         asked = True
         if item.refund_policy:
             parts.append(_sentence(item.refund_policy))
         else:
             gaps.append("refund_unconfirmed")
-            parts.append("退款规则还没定。")
     if flags["timeline"]:
         asked = True
         if item.timeline_text:
             parts.append(_sentence(item.timeline_text if str(item.timeline_text).startswith("工期") else f"工期{item.timeline_text}"))
         else:
             gaps.append("timeline_unconfirmed")
-            parts.append("工期还没定。")
     if flags["scope"]:
         asked = True
         if item.scope_text:
-            parts.append(_sentence(f"范围是{item.scope_text}"))
+            parts.append(_sentence(item.scope_text if "。" in item.scope_text else f"{item.scope_text}"))
         else:
             gaps.append("scope_unconfirmed")
-            parts.append("范围还没定。")
     if flags["spec"]:
         asked = True
         bits = []
         if item.model_text:
-            bits.append(f"型号是{item.model_text}")
+            bits.append(f"型号{item.model_text}")
         if item.condition_text:
-            bits.append(f"成色是{item.condition_text}")
+            bits.append(f"成色{item.condition_text}")
         if bits:
             parts.append(_sentence("，".join(bits)))
         else:
             gaps.append("fact_unconfirmed")
-            parts.append("型号成色还没定。")
     if refused_offer or flags["price"]:
         asked = True
         if item.listed_price_yuan is not None:
-            parts.append(_price_sentence(item, refuse=refused_offer))
+            parts.append(_price_sentence(item, text, refuse=refused_offer))
         elif item.floor_price_yuan is not None and flags["discount"]:
             parts.append(f"底价{_format_yuan(item.floor_price_yuan)}元。")
         else:
             gaps.append("price_unconfirmed")
-            parts.append("价格还没定。")
+    if gaps:
+        parts.append(_gap_sentence(gaps))
 
     if not asked:
-        line = f"在。{item.title}。"
         if item.listed_price_yuan is not None:
-            line += _price_sentence(item, refuse=False)
-        return "pending_review", "ack", line, []
+            return "pending_review", "ack", f"在，{_price_sentence(item, text, refuse=False)}", []
+        return "pending_review", "ack", f"在，{item.title}。", []
 
     if gaps:
         return "handoff", gaps[0], "".join(parts), gaps
@@ -455,9 +491,20 @@ def text_safety_problems(
         problems.append("unapproved_shipping")
     for raw in YUAN_RE.findall(draft):
         value = float(raw)
-        if not any(abs(value - price) <= 0.001 for price in prices):
-            problems.append(f"unapproved_price:{raw}")
+        if any(abs(value - price) <= 0.001 for price in prices):
+            continue
+        token = _format_yuan(value)
+        refusal = f"{token}元不行"
+        if refusal in draft and prices:
+            remainder = draft.replace(refusal, "", 1)
+            if not re.search(rf"(?<!\d){re.escape(token)}元", remainder):
+                continue
+        problems.append(f"unapproved_price:{raw}")
     return problems
+
+
+def _conflicting_price_number_text(text: str) -> bool:
+    return bool(re.search(r"(?<!\d)(\d+(?:\.\d+)?)(?!\d)", text))
 
 
 def _conflicting_price_number(text: str, item: CatalogItem) -> bool:

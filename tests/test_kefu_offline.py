@@ -162,10 +162,9 @@ def test_listed_router_price_and_refuses_other_amount():
     )
 
     assert quoted.reason == "listed_price"
-    assert quoted.buyer_visible_draft == "标价310元，包邮。"
+    assert quoted.buyer_visible_draft == "310元包邮。"
     assert refused.reason == "listed_price"
-    assert refused.buyer_visible_draft == "不能按你说的价。标价310元，包邮。"
-    assert "20" not in refused.buyer_visible_draft
+    assert refused.buyer_visible_draft == "20元不行，310元包邮。"
     assert "最低" not in refused.buyer_visible_draft
 
 
