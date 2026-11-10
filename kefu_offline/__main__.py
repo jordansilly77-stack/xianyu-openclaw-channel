@@ -1,0 +1,252 @@
+"""离线回放和本机模型预览。不读取私信，不连接闲鱼，不发送。"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+from kefu_offline.engine import FIXTURE_DIR, load_catalog, run_replay
+from kefu_offline.http_api import list_reviews
+from kefu_offline.live import production_preview_turn
+from kefu_offline.model_client import OpenAICompatibleClient, missing_model_env
+from kefu_offline.suite_runner import EchoModel, reevaluate_checkpoint, run_suite
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="待审客服回放。不会连接闲鱼，也不会发送。"
+    )
+    parser.add_argument("--catalog", type=Path, default=None)
+    parser.add_argument("--replay", type=Path, default=None)
+    parser.add_argument("--generator", choices=("rules", "mock"), default="rules")
+    parser.add_argument("--mac-preview", action="store_true")
+    parser.add_argument("--suite", action="store_true")
+    parser.add_argument("--fake-model", action="store_true")
+    parser.add_argument("--max-model-calls", type=int, default=180)
+    parser.add_argument("--timeout-budget", type=float, default=600)
+    parser.add_argument("--checkpoint", type=Path, default=None)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--subset", default="")
+    parser.add_argument("--reeval", type=Path, default=None)
+    parser.add_argument("--reeval-out", type=Path, default=None)
+    parser.add_argument("--list-reviews", action="store_true")
+    args = parser.parse_args(argv)
+    if args.reeval:
+        return reeval_cli(args)
+    if args.suite:
+        return run_suite_cli(args)
+    if args.mac_preview:
+        return mac_preview(args.catalog, args.replay)
+    if args.list_reviews:
+        json.dump(list_reviews(), sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    catalog = load_catalog(args.catalog or FIXTURE_DIR / "example_catalog.json")
+    cases = json.loads((args.replay or FIXTURE_DIR / "replay_messages.json").read_text(encoding="utf-8"))
+    decisions, failures = run_replay(catalog, cases, generator=args.generator)
+    summary = {
+        "catalog_id": catalog.catalog_id,
+        "generator": args.generator,
+        "model_invoked": False,
+        "send_allowed": False,
+        "cases": len(decisions),
+        "failed": len(failures),
+        "results": [item.to_dict() for item in decisions],
+        "failures": failures,
+    }
+    json.dump(summary, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    return 1 if failures else 0
+
+
+def reeval_cli(args) -> int:
+    source = Path(args.reeval)
+    if args.reeval_out and Path(args.reeval_out).resolve() == source.resolve():
+        json.dump(
+            {"ok": False, "error": "reeval-out must not replace the source checkpoint", "model_calls": 0},
+            sys.stdout,
+            ensure_ascii=False,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+        return 2
+    before = source.read_bytes()
+    report = reevaluate_checkpoint(source)
+    if source.read_bytes() != before:
+        raise RuntimeError("reeval must not modify the checkpoint")
+    text = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    if args.reeval_out:
+        out = Path(args.reeval_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+    sys.stdout.write(text)
+    return int(report["reeval"]["exit_code"])
+
+
+def run_suite_cli(args) -> int:
+    from kefu_offline.fixtures.sim_logic_suite import build_suite, close_suite, deep_suite, exposed_suite, style_suite, suite_counts, write_catalog
+
+    if args.subset == "exposed":
+        sessions = exposed_suite()
+    elif args.subset == "style":
+        sessions = style_suite()
+    elif args.subset == "deep":
+        sessions = deep_suite()
+    elif args.subset == "close":
+        sessions = close_suite()
+    else:
+        sessions = build_suite()
+    counts = suite_counts(sessions)
+    full = args.subset not in {"exposed", "style", "deep", "close"}
+    if full and (counts["turns"] < 200 or counts["sessions"] < 30 or counts["expect_model"] < 120 or counts["categories"] < 10):
+        json.dump({"ok": False, "counts": counts}, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return 1
+    catalog = args.catalog or Path("data/sim_suite_catalog.yml")
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    write_catalog(catalog)
+    os.environ["KEFU_CATALOG_PATH"] = str(catalog)
+    os.environ.pop("XIANYU_ALLOW_SEND", None)
+    checkpoint = args.checkpoint or Path("data/suite_results.jsonl")
+    if args.fake_model:
+        client = EchoModel()
+        os.environ["KEFU_MODEL_MODE"] = "openai"
+        transport = "fake-http"
+    else:
+        missing = missing_model_env()
+        if missing:
+            json.dump({"ok": False, "missing_env": missing, "send_allowed": False}, sys.stdout, ensure_ascii=False, indent=2)
+            sys.stdout.write("\n")
+            return 2
+        os.environ["KEFU_MODEL_MODE"] = "openai"
+        client = OpenAICompatibleClient.from_env()
+        transport = "openai-compatible"
+    if args.resume and checkpoint.exists():
+        pass
+    elif checkpoint.exists() and not args.resume:
+        checkpoint.unlink()
+    summary = run_suite(
+        sessions,
+        model_client=client,
+        max_model_calls=args.max_model_calls,
+        timeout_budget_s=args.timeout_budget,
+        checkpoint=checkpoint,
+        resume=args.resume,
+    )
+    public = {key: value for key, value in summary.items() if key != "results"}
+    if args.subset in {"style", "deep", "close"}:
+        public["turns"] = [
+            {
+                "turn_id": row.get("turn_id"),
+                "text": row.get("text"),
+                "model_candidate": row.get("model_candidate"),
+                "reject_reasons": row.get("reject_reasons") or [],
+                "final_draft": row.get("final_draft"),
+                "model_adopted": row.get("model_adopted"),
+                "model_rejected": row.get("model_rejected"),
+                "ok": row.get("ok"),
+                "failures": row.get("failures") or [],
+                "human_review": row.get("human_review"),
+            }
+            for row in summary["results"]
+        ]
+        public["human_review_turns"] = [row.get("turn_id") for row in summary["results"] if row.get("human_review")]
+    public["transport"] = transport
+    public["checkpoint"] = str(checkpoint)
+    public["simulated"] = True
+    json.dump(public, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    return 0 if summary["failed"] == 0 else 1
+
+
+def case_to_wire(case: dict) -> dict:
+    wire = case.get("wire")
+    if isinstance(wire, dict):
+        return wire
+    item_id = str(case.get("item_id") or "").strip()
+    url = f"fleamarket://message_chat?itemId={item_id}&peerUserId=900000000001" if item_id else ""
+    chat = str(case.get("conversation_id") or case.get("id") or "preview")
+    return {
+        "1": {
+            "10": {
+                "senderUserId": "900000000001",
+                "senderNick": "模拟买家",
+                "reminderContent": case.get("text") or "",
+                "reminderUrl": url,
+            },
+            "2": f"{chat}@goofish",
+            "5": 1700000000000,
+        },
+        "3": {},
+    }
+
+
+def mac_preview(catalog: Optional[Path] = None, replay: Optional[Path] = None) -> int:
+    """本机模型预览。单条或 --replay 批量都走 production_preview_turn，不连接闲鱼。"""
+    missing = missing_model_env()
+    if missing:
+        json.dump(
+            {
+                "ok": False,
+                "send_allowed": False,
+                "missing_env": missing,
+                "hint": "在 Mac 上设置 OPENAI_BASE_URL、OPENAI_API_KEY、OPENAI_MODEL 后再运行。不要把密钥写进仓库。",
+            },
+            sys.stdout,
+            ensure_ascii=False,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+        return 2
+    os.environ["KEFU_MODEL_MODE"] = "openai"
+    os.environ.pop("XIANYU_ALLOW_SEND", None)
+    os.environ["KEFU_CATALOG_PATH"] = str(catalog or FIXTURE_DIR / "mac_preview_catalog.yml")
+    os.environ.setdefault("KEFU_REVIEW_PATH", "data/kefu_mac_preview.jsonl")
+    if replay is None:
+        wire = json.loads((FIXTURE_DIR / "mac_preview_wire.json").read_text(encoding="utf-8"))
+        cases = [{"id": "mac-preview", "wire": wire}]
+    else:
+        cases = json.loads(Path(replay).read_text(encoding="utf-8"))
+    results = []
+    for case in cases:
+        started = time.perf_counter()
+        record = production_preview_turn(case_to_wire(case))
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        results.append(
+            {
+                "id": case.get("id"),
+                "status": record.get("status"),
+                "reason": record.get("reason"),
+                "buyer_visible_draft": record.get("buyer_visible_draft"),
+                "model_invoked": bool(record.get("model_invoked")),
+                "model_adopted": bool(record.get("model_adopted")),
+                "model_rejected": bool(record.get("model_rejected")),
+                "model_error": record.get("model_error"),
+                "elapsed_ms": elapsed_ms,
+                "send_allowed": False,
+                "transport_send": False,
+            }
+        )
+    payload = {
+        "send_allowed": False,
+        "transport_send": False,
+        "xianyu_transport": "isolated",
+        "cases": results,
+    }
+    json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    if any(item.get("model_error") for item in results):
+        return 1
+    if any(item["status"] == "pending_review" and not item["model_invoked"] for item in results):
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

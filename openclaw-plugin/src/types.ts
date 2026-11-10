@@ -28,7 +28,9 @@ export interface BridgeMessageEvent {
   senderName: string;
   content: string;
   contentType: "text" | "image" | "system";
-  itemId?: string;
+  itemId?: string | null;
+  itemKnown?: boolean;
+  needsHuman?: boolean;
   timestamp: number;
   accountId: string;
 }
@@ -104,6 +106,7 @@ export interface XianyuChannelConfig {
   reconnectJitter?: number;
   // ✅ 问题5修复：SSE 消息优化配置选项
   sendMode?: "final-only" | "all" | "merged";
+  delivery?: "preview" | "send";
   typingIndicator?: boolean;
   cacheTimeout?: number;
 }

@@ -1,0 +1,16 @@
+# 复制为 kefu_catalog.yml 后填写。不要把未知事实写成确定承诺。
+catalog_id: seller
+items:
+  - item_id: ""
+    title: ""
+    kind: goods
+    match_terms: []
+    listed_price_yuan: null
+    shipping: null
+    scope_text: null
+    timeline_text: null
+    model_text: null
+    condition_text: null
+    refund_policy: null
+    description: null
+    floor_price_yuan: null

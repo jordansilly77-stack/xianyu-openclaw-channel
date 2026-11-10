@@ -1,0 +1,16 @@
+catalog_id: mac-preview-sim
+disclaimer: 只给本机模型预览用的模拟资料，不是在售商品，也不能当作卖家承诺。
+items:
+  - item_id: sim-preview-001
+    title: 模拟验收商品
+    kind: goods
+    match_terms: []
+    listed_price_yuan: 15
+    shipping: 包邮
+    scope_text: 仅用于本机预览的范围说明
+    timeline_text: null
+    model_text: null
+    condition_text: null
+    refund_policy: null
+    description: 这是模拟资料。
+    floor_price_yuan: null

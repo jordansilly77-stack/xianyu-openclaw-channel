@@ -39,6 +39,78 @@ OpenClaw Agent ←→ Channel Plugin (TS) ←HTTP/SSE→ Bridge API (Python) ←
 | Node.js | 16+ |
 | OpenClaw | 最新版 |
 
+## 客服预览（不连接闲鱼、不发送）
+
+买家消息会进入原来的接收和回复路径，生成待审草稿。默认不向买家发送。`kefu_catalog.yml` 里没填的商品事实保持空白。
+
+不连闲鱼的规则回放：
+
+```bash
+python -m kefu_offline
+```
+
+父在 Mac 上做单次真实模型预览时，先从本机正式配置读出密钥，再只通过环境变量传入。云端和仓库都不保存这把密钥，也不要改成公网地址。
+
+```bash
+export OPENAI_BASE_URL="http://127.0.0.1:3425/v1"
+export OPENAI_MODEL="group/free-first"
+export OPENAI_API_KEY="从本机正式配置读取"
+export OPENAI_TIMEOUT="30"
+python -m kefu_offline --mac-preview \
+  --catalog kefu_offline/fixtures/mac_preview_catalog.yml \
+  --replay kefu_offline/fixtures/mac_preview_batch.json
+```
+
+不带 `--replay` 时仍是原来的单条预览。批量里的每一条都走 `production_preview_turn`。规则已经判定待人工的例子不会再调模型。输出里有草稿、是否调用模型、候选是否采用、规则原因、耗时和发送关闭状态。
+
+跨品类多轮套件也走同一条预览路径。云端只能加 `--fake-model`，这不是 Mac 上的真实模型验收。父在 Mac 上拿现成网关跑时不要加这个参数，请求数受 `--max-model-calls` 限制，默认 180。
+
+```bash
+python -m kefu_offline --suite --fake-model --max-model-calls 180 --checkpoint data/suite_results.jsonl
+```
+
+```bash
+export OPENAI_BASE_URL="http://127.0.0.1:3425/v1"
+export OPENAI_MODEL="group/free-first"
+export OPENAI_API_KEY="从本机正式配置读取"
+export OPENAI_TIMEOUT="30"
+python -m kefu_offline --suite --max-model-calls 180 --timeout-budget 600 --checkpoint data/suite_results.jsonl
+```
+
+终端会打印 `sessions`、`turns`、`model_invoked`、`rule_skipped`、`failed`、`guard_blocked`、`model_output_rejected`、`human_review`。`guard_blocked` 是坏候选被挡住，不是模型答对。checkpoint 里的 `model_candidate` 和 `reject_reasons` 只在模拟套件里保留。失败时退出码不是 0。`--resume` 只跳过已经成功的轮次。
+
+已有 checkpoint 可以按当前断言重评，不再请求模型，也不改原日志。原跑的 `failed` 留在输出的 `original` 里；新分数在 `reeval`。判定版本是 `judgment_version`。
+
+```bash
+python -m kefu_offline --reeval data/suite_results.jsonl --reeval-out data/suite_reeval.json
+```
+
+`--reeval-out` 不能写成原 checkpoint。这条命令不需要模型环境变量。
+
+口吻子集和深测都不进 204 套件。204 轮自动通过不等于语义全部正确。下一次只回归这次改动的 `close` 子集：6 轮，期望模型 5 次，规则 1 次。输出里有原候选、拒绝原因、最终稿，以及 `model_rejected` 和 `inherited_guard`。沿用旧终稿不再计入模型拒绝。
+
+```bash
+python -m kefu_offline --suite --subset close --max-model-calls 10 --timeout-budget 120 --checkpoint data/suite_close.jsonl
+```
+
+```bash
+python -m kefu_offline --suite --subset deep --max-model-calls 60 --timeout-budget 240 --checkpoint data/suite_deep.jsonl
+```
+
+深测预算是 60 次真实模型和 240 秒。假模型或脚本坏候选只证明护栏，不能和真网关结果混成一次通过。
+
+```bash
+python -m kefu_offline --suite --subset style --max-model-calls 20 --checkpoint data/suite_style.jsonl
+```
+
+先跑上次 Mac 暴露的几段：
+
+```bash
+python -m kefu_offline --suite --subset exposed --max-model-calls 30 --checkpoint data/suite_exposed.jsonl
+```
+
+这条命令使用模拟商品和模拟买家消息，走生产用的商品识别、规则和模型调用，不打开闲鱼连接。说明见 `docs/KEFU_OFFLINE_RECOVERY.md`。
+
 ## 🚀 快速开始
 
 ### 1. 克隆仓库

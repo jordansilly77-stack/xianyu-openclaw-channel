@@ -1,0 +1,13 @@
+{
+  "1": {
+    "10": {
+      "senderUserId": "900000000001",
+      "senderNick": "模拟买家",
+      "reminderContent": "在吗，这个多少钱，包含什么？",
+      "reminderUrl": "fleamarket://message_chat?itemId=sim-preview-001&peerUserId=900000000001"
+    },
+    "2": "mac-preview@goofish",
+    "5": 1700000000000
+  },
+  "3": {}
+}

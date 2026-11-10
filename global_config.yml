@@ -78,3 +78,9 @@ WEBSOCKET_HEADERS:
   User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
     like Gecko) Chrome/133.0.0.0 Safari/537.36
 WEBSOCKET_URL: wss://wss-goofish.dingtalk.com/
+KEFU:
+  delivery: preview
+  model_mode: rules
+  catalog_path: kefu_catalog.yml
+  review_path: data/kefu_reviews.jsonl
+  model_timeout_seconds: 30
